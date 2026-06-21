@@ -20,6 +20,7 @@ ORDERED_MENU_ROUTES = [
     "/notifications",
     "/hrms",
     "/access-provider",
+    "/inventory",
 ]
 
 _ARTIST_DEFAULTS = {
@@ -41,6 +42,7 @@ _FULL_ACCESS_DEFAULTS = {
     "/teams",
     "/notifications",
     "/hrms",
+    "/inventory",
 }
 
 _FULL_ACCESS_ROLES = {"Supervisor", "Team Lead", "Admin", "Production", "Management"}
@@ -89,6 +91,29 @@ def _ensure_table():
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    try:
+        has_other_routes = run_query(
+            "SELECT 1 FROM role_menu_permissions WHERE route != %s LIMIT 1",
+            ("/inventory",),
+            fetch_all=True
+        )
+        if has_other_routes:
+            existing = run_query(
+                "SELECT 1 FROM role_menu_permissions WHERE route = %s LIMIT 1",
+                ("/inventory",),
+                fetch_all=True
+            )
+            if not existing:
+                for role in ["Admin", "Production", "Management", "Supervisor", "Team Lead"]:
+                    run_query(
+                        """
+                        INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed)
+                        VALUES (%s, %s, 1)
+                        """,
+                        (role, "/inventory")
+                    )
+    except Exception:
+        pass
 
 
 def _is_admin(user):

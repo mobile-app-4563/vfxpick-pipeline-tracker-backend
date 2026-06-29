@@ -268,3 +268,92 @@ INSERT INTO chat_messages (message_id, shot_id, sender_id, message, created_at) 
 INSERT INTO notifications (id, user_id, message, type, is_read, timestamp) VALUES
 ('NTF001', 'USR005', 'New shot CYB_010_0010 has been assigned to you.',    'Task Assigned', FALSE, DATE_SUB(NOW(), INTERVAL 2 HOUR)),
 ('NTF002', 'USR003', 'Shot CYB_010_0010 submitted for QC by Sunil Kumar.', 'QC Submitted',  FALSE, DATE_SUB(NOW(), INTERVAL 1 HOUR));
+
+-- ============================================================
+-- ACCESS PROVIDER SEED (current route flow)
+-- Admin: full access including Access Provider.
+-- Production/Management/Supervisor/Team Lead: full module access minus Access Provider.
+-- Artist: restricted menu.
+-- ============================================================
+INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
+-- Admin
+('Admin', '/home', TRUE),
+('Admin', '/dashboard', TRUE),
+('Admin', '/bidding', TRUE),
+('Admin', '/projects', TRUE),
+('Admin', '/assets', TRUE),
+('Admin', '/tasks', TRUE),
+('Admin', '/review', TRUE),
+('Admin', '/feedback', TRUE),
+('Admin', '/reports', TRUE),
+('Admin', '/teams', TRUE),
+('Admin', '/notifications', TRUE),
+('Admin', '/hrms', TRUE),
+('Admin', '/inventory', TRUE),
+('Admin', '/access-provider', TRUE),
+
+-- Production
+('Production', '/home', TRUE),
+('Production', '/dashboard', TRUE),
+('Production', '/bidding', TRUE),
+('Production', '/projects', TRUE),
+('Production', '/assets', TRUE),
+('Production', '/tasks', TRUE),
+('Production', '/review', TRUE),
+('Production', '/feedback', TRUE),
+('Production', '/reports', TRUE),
+('Production', '/teams', TRUE),
+('Production', '/notifications', TRUE),
+('Production', '/hrms', TRUE),
+('Production', '/inventory', TRUE),
+
+-- Management
+('Management', '/home', TRUE),
+('Management', '/dashboard', TRUE),
+('Management', '/bidding', TRUE),
+('Management', '/projects', TRUE),
+('Management', '/assets', TRUE),
+('Management', '/tasks', TRUE),
+('Management', '/review', TRUE),
+('Management', '/feedback', TRUE),
+('Management', '/reports', TRUE),
+('Management', '/teams', TRUE),
+('Management', '/notifications', TRUE),
+('Management', '/hrms', TRUE),
+('Management', '/inventory', TRUE),
+
+-- Supervisor
+('Supervisor', '/home', TRUE),
+('Supervisor', '/dashboard', TRUE),
+('Supervisor', '/bidding', TRUE),
+('Supervisor', '/projects', TRUE),
+('Supervisor', '/assets', TRUE),
+('Supervisor', '/tasks', TRUE),
+('Supervisor', '/review', TRUE),
+('Supervisor', '/feedback', TRUE),
+('Supervisor', '/reports', TRUE),
+('Supervisor', '/teams', TRUE),
+('Supervisor', '/notifications', TRUE),
+('Supervisor', '/hrms', TRUE),
+('Supervisor', '/inventory', TRUE),
+
+-- Team Lead
+('Team Lead', '/home', TRUE),
+('Team Lead', '/dashboard', TRUE),
+('Team Lead', '/bidding', TRUE),
+('Team Lead', '/projects', TRUE),
+('Team Lead', '/assets', TRUE),
+('Team Lead', '/tasks', TRUE),
+('Team Lead', '/review', TRUE),
+('Team Lead', '/feedback', TRUE),
+('Team Lead', '/reports', TRUE),
+('Team Lead', '/teams', TRUE),
+('Team Lead', '/notifications', TRUE),
+('Team Lead', '/hrms', TRUE),
+('Team Lead', '/inventory', TRUE),
+
+-- Artist
+('Artist', '/home', TRUE),
+('Artist', '/dashboard', TRUE),
+('Artist', '/tasks', TRUE),
+('Artist', '/notifications', TRUE);

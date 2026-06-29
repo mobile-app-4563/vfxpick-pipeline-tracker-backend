@@ -15,6 +15,72 @@ from common.serializers import SHOT_SELECT, shot_to_json
 dashboard_bp = Blueprint("dashboard", __name__)
 
 
+@dashboard_bp.route("/invent-active-shows", methods=["GET"])
+@token_required
+def invent_active_shows(_current_user_id):
+    """Approved/Approved Internal shows for Home with expandable details."""
+    statuses = ["Approved", "Approved Internal"]
+
+    rows = run_query(
+        """
+        SELECT CASE
+                   WHEN SUM(CASE WHEN s.status = 'Approved Internal' THEN 1 ELSE 0 END) > 0
+                       THEN 'Approved Internal'
+                   ELSE 'Approved'
+               END AS status,
+               sh.show_id,
+               sh.show_name,
+               sh.client_id,
+               c.client_name,
+               COUNT(*) AS shot_count,
+               COALESCE(SUM(s.client_bid), 0) AS total_mandays,
+               MIN(s.due_date) AS min_due_date,
+               MAX(s.due_date) AS max_due_date,
+               GROUP_CONCAT(DISTINCT s.department ORDER BY s.department SEPARATOR ',') AS departments,
+               MAX(s.updated_at) AS last_updated_at
+        FROM shots s
+        JOIN shows sh ON s.show_id = sh.show_id
+        JOIN clients c ON sh.client_id = c.client_id
+        WHERE s.status IN (%s, %s)
+        GROUP BY sh.show_id, sh.show_name, sh.client_id, c.client_name
+        ORDER BY FIELD(status, 'Approved', 'Approved Internal'), sh.show_name
+        """,
+        tuple(statuses),
+        fetch_all=True,
+    ) or []
+
+    grouped = {status: [] for status in statuses}
+    for row in rows:
+        status = row.get("status")
+        if status not in grouped:
+            continue
+        departments = (row.get("departments") or "")
+        grouped[status].append(
+            {
+                "showId": row.get("show_id"),
+                "showName": row.get("show_name"),
+                "clientId": row.get("client_id"),
+                "clientName": row.get("client_name"),
+                "status": status,
+                "shotCount": int(row.get("shot_count") or 0),
+                "totalMandays": float(row.get("total_mandays") or 0),
+                "minDueDate": to_iso(row.get("min_due_date")),
+                "maxDueDate": to_iso(row.get("max_due_date")),
+                "departments": [d for d in departments.split(",") if d],
+                "lastUpdatedAt": to_iso(row.get("last_updated_at")),
+            }
+        )
+
+    return success(
+        {
+            "statuses": [
+                {"status": status, "shows": grouped.get(status, [])}
+                for status in statuses
+            ]
+        }
+    )
+
+
 @dashboard_bp.route("/summary", methods=["GET"])
 @token_required
 def summary(_current_user_id):

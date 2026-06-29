@@ -4,6 +4,7 @@ from auth.middleware import token_required
 from common.constants import USER_ROLES
 from common.db_utils import get_user, run_query
 from common.http import failure, success
+from common.options_store import ROLE_CATEGORY, list_options, seed_options
 
 access_bp = Blueprint("access", __name__)
 
@@ -15,6 +16,7 @@ ORDERED_MENU_ROUTES = [
     "/assets",
     "/tasks",
     "/review",
+    "/feedback",
     "/reports",
     "/teams",
     "/notifications",
@@ -38,6 +40,7 @@ _FULL_ACCESS_DEFAULTS = {
     "/assets",
     "/tasks",
     "/review",
+    "/feedback",
     "/reports",
     "/teams",
     "/notifications",
@@ -112,6 +115,21 @@ def _ensure_table():
                         """,
                         (role, "/inventory")
                     )
+
+        has_feedback = run_query(
+            "SELECT 1 FROM role_menu_permissions WHERE route = %s LIMIT 1",
+            ("/feedback",),
+            fetch_all=True,
+        )
+        if not has_feedback:
+            for role in ["Admin", "Production", "Management", "Supervisor", "Team Lead"]:
+                run_query(
+                    """
+                    INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed)
+                    VALUES (%s, %s, 1)
+                    """,
+                    (role, "/feedback"),
+                )
     except Exception:
         pass
 
@@ -121,6 +139,7 @@ def _is_admin(user):
 
 
 def _known_roles():
+    seed_options(ROLE_CATEGORY, USER_ROLES)
     rows = run_query(
         """
         SELECT DISTINCT role
@@ -134,9 +153,10 @@ def _known_roles():
         for r in rows
         if (r.get("role") or "").strip()
     }
+    configured_roles = set(list_options(ROLE_CATEGORY))
     ordered = []
     seen = set()
-    for role in USER_ROLES + sorted(dynamic_roles):
+    for role in USER_ROLES + sorted(configured_roles | dynamic_roles):
         if role and role not in seen:
             ordered.append(role)
             seen.add(role)

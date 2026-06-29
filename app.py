@@ -70,6 +70,7 @@ def create_app() -> Flask:
     from access.routes import access_bp
     from hrms_proxy.routes import hrms_proxy_bp
     from inventory.routes import inventory_bp
+    from feedback.routes import feedback_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(bidding_bp, url_prefix="/api/bidding")
@@ -77,6 +78,7 @@ def create_app() -> Flask:
     app.register_blueprint(projects_bp, url_prefix="/api/projects")
     app.register_blueprint(tasks_bp, url_prefix="/api/tasks")
     app.register_blueprint(teams_bp, url_prefix="/api/teams")
+    
     app.register_blueprint(review_bp, url_prefix="/api/review")
     app.register_blueprint(reports_bp, url_prefix="/api/reports")
     app.register_blueprint(assets_bp, url_prefix="/api/assets")
@@ -85,6 +87,7 @@ def create_app() -> Flask:
     app.register_blueprint(access_bp, url_prefix="/api/access")
     app.register_blueprint(hrms_proxy_bp, url_prefix="/api/hrms-proxy")
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
+    app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
 
     # Health Check Endpoint
     @app.route("/")

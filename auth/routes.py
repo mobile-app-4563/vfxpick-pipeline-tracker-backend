@@ -122,13 +122,11 @@ def options():
     )
     supervisor_statuses = _merge_ordered(
         SUPERVISOR_STATUSES,
-        list_options(SUPERVISOR_STATUS_CATEGORY)
-        + _distinct_values("shots", "supervisor_status"),
+        [v for v in list_options(SUPERVISOR_STATUS_CATEGORY) + _distinct_values("shots", "supervisor_status") if v in SUPERVISOR_STATUSES],
     )
     artist_statuses = _merge_ordered(
         ARTIST_STATUSES,
-        list_options(ARTIST_STATUS_CATEGORY)
-        + _distinct_values("shots", "artist_status"),
+        [v for v in list_options(ARTIST_STATUS_CATEGORY) + _distinct_values("shots", "artist_status") if v in ARTIST_STATUSES],
     )
     broad_access_roles = _merge_ordered(
         BROAD_ACCESS_ROLES,

@@ -108,9 +108,9 @@ CREATE TABLE shots (
     artist_bid         DECIMAL(6,2) DEFAULT 0,
     artist_eta         DATE         DEFAULT NULL,
     description        TEXT         DEFAULT NULL,
-    supervisor_status  ENUM('Awaiting QC', 'Feedback', 'Approved', 'Hold', 'Client FB')
+    supervisor_status  ENUM('Feedback', 'Approved', 'Hold')
                                     DEFAULT NULL,
-    artist_status      ENUM('YTS', 'In Progress', 'WIP Complete', 'QC', 'Additional')
+    artist_status      ENUM('YTS', 'In Progress', 'Awaiting QC', 'WIP Completed', 'Render & Upload Completed', 'QC', 'Additional')
                                     NOT NULL DEFAULT 'YTS',
     allocated_date     DATE         DEFAULT NULL,
     mandays            DECIMAL(6,2) NOT NULL DEFAULT 0, -- delivered mandays
@@ -254,9 +254,9 @@ INSERT INTO shots
      client_eta, notes, status, artist_id, artist_bid, artist_eta, description,
      supervisor_status, artist_status, allocated_date, mandays, due_date, client_feedback)
 VALUES
-('SHT001', 'SHW001', 'ROTO', 'CYB_010_0010', 1001, 1085, 2.50, 3.00, DATE_ADD(CURDATE(), INTERVAL 5 DAY),  'Lock roto on hero',      'Approved Internal', 'USR005', 2.00, DATE_ADD(CURDATE(), INTERVAL 3 DAY), 'Full body roto', 'Awaiting QC', 'In Progress',  DATE_SUB(CURDATE(), INTERVAL 1 DAY), 2.00, DATE_ADD(CURDATE(), INTERVAL 5 DAY),  NULL),
+('SHT001', 'SHW001', 'ROTO', 'CYB_010_0010', 1001, 1085, 2.50, 3.00, DATE_ADD(CURDATE(), INTERVAL 5 DAY),  'Lock roto on hero',      'Approved Internal', 'USR005', 2.00, DATE_ADD(CURDATE(), INTERVAL 3 DAY), 'Full body roto', 'Feedback', 'In Progress',  DATE_SUB(CURDATE(), INTERVAL 1 DAY), 2.00, DATE_ADD(CURDATE(), INTERVAL 5 DAY),  NULL),
 ('SHT002', 'SHW001', 'ROTO', 'CYB_010_0020', 1086, 1150, 1.50, 2.00, DATE_ADD(CURDATE(), INTERVAL 6 DAY),  'Background roto',        'Awaiting Approval', 'USR006', 1.50, DATE_ADD(CURDATE(), INTERVAL 4 DAY), 'BG plates roto', NULL,          'YTS',          NULL,                               0.00, DATE_ADD(CURDATE(), INTERVAL 6 DAY),  NULL),
-('SHT003', 'SHW001', 'COMP', 'CYB_010_0010', 1001, 1085, 3.00, 4.00, DATE_ADD(CURDATE(), INTERVAL 8 DAY),  'Final comp neon',        'Hold',              'USR008', 3.50, DATE_ADD(CURDATE(), INTERVAL 7 DAY), 'Neon comp',      'Hold',        'WIP Complete', DATE_SUB(CURDATE(), INTERVAL 2 DAY), 3.50, DATE_ADD(CURDATE(), INTERVAL 8 DAY),  'Push the glow'),
+('SHT003', 'SHW001', 'COMP', 'CYB_010_0010', 1001, 1085, 3.00, 4.00, DATE_ADD(CURDATE(), INTERVAL 8 DAY),  'Final comp neon',        'Hold',              'USR008', 3.50, DATE_ADD(CURDATE(), INTERVAL 7 DAY), 'Neon comp',      'Hold',        'WIP Completed', DATE_SUB(CURDATE(), INTERVAL 2 DAY), 3.50, DATE_ADD(CURDATE(), INTERVAL 8 DAY),  'Push the glow'),
 ('SHT004', 'SHW002', 'PAINT','DRG_001_0010', 2001, 2120, 2.00, 2.50, DATE_ADD(CURDATE(), INTERVAL 4 DAY),  'Wire removal',           'Approved',          'USR007', 2.00, DATE_SUB(CURDATE(), INTERVAL 1 DAY), 'Paint cleanup',  'Approved',    'QC',           DATE_SUB(CURDATE(), INTERVAL 3 DAY), 2.00, DATE_ADD(CURDATE(), INTERVAL 4 DAY),  'Looks good'),
 ('SHT005', 'SHW003', 'MM',   'DST_005_0030', 3001, 3090, 1.00, 1.50, DATE_ADD(CURDATE(), INTERVAL 10 DAY), 'Camera track desert',    'Awaiting Approval', 'USR009', 1.00, DATE_ADD(CURDATE(), INTERVAL 9 DAY), 'Matchmove cam',  NULL,          'YTS',          NULL,                               0.00, DATE_ADD(CURDATE(), INTERVAL 10 DAY), NULL),
 ('SHT006', 'SHW005', 'COMP', 'NGT_002_0050', 5001, 5075, 2.50, 3.00, DATE_ADD(CURDATE(), INTERVAL 12 DAY), 'Night city integration', 'Approved Internal', NULL,     0.00, NULL,                               'City comp',      NULL,          'YTS',          NULL,                               0.00, DATE_ADD(CURDATE(), INTERVAL 12 DAY), NULL);

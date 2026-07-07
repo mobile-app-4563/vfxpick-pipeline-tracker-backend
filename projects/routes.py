@@ -216,8 +216,8 @@ def create_shot(current_user_id):
         """
         INSERT INTO shots
             (shot_id, show_id, department, shot_code, frame_in, frame_out,
-             supervisor_bid, client_bid, client_eta, notes, status, description, due_date)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             supervisor_bid, client_bid, client_eta, notes, status, description, due_date, client_feedback)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             shot_id,
@@ -233,6 +233,7 @@ def create_shot(current_user_id):
             status,
             data.get("description"),
             data.get("dueDate"),
+            data.get("clientFeedback"),
         ),
     )
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)

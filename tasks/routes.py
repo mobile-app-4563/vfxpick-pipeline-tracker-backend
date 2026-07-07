@@ -180,9 +180,7 @@ def update_artist_status(current_user_id, shot_id):
         params.append(data["mandays"])
 
     # Feature (v): submitting for QC notifies the supervisors & team leads.
-    submitted_for_qc = artist_status in ("WIP Complete", "QC")
-    if submitted_for_qc:
-        sets.append("supervisor_status = 'Awaiting QC'")
+    submitted_for_qc = artist_status in ("WIP Completed", "QC")
 
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))

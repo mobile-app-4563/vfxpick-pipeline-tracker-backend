@@ -20,6 +20,7 @@ ORDERED_MENU_ROUTES = [
     "/reports",
     "/teams",
     "/notifications",
+    "/user-register",
     "/hrms",
     "/access-provider",
     "/inventory",
@@ -44,11 +45,20 @@ _FULL_ACCESS_DEFAULTS = {
     "/reports",
     "/teams",
     "/notifications",
+    "/user-register",
     "/hrms",
     "/inventory",
 }
 
 _FULL_ACCESS_ROLES = {"Supervisor", "Team Lead", "Admin", "Production", "Management"}
+
+_ROUTE_ALIASES = {
+    "/register": "/user-register",
+}
+
+
+def _canonical_route(route):
+    return _ROUTE_ALIASES.get(route, route)
 
 
 def _apply_route_invariants(mapping):
@@ -77,6 +87,24 @@ def _ensure_table():
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    try:
+        run_query(
+            """
+            DELETE legacy
+            FROM role_menu_permissions AS legacy
+            INNER JOIN role_menu_permissions AS canonical
+                ON canonical.role = legacy.role
+               AND canonical.route = %s
+            WHERE legacy.route = %s
+            """,
+            ("/user-register", "/register"),
+        )
+        run_query(
+            "UPDATE role_menu_permissions SET route = %s WHERE route = %s",
+            ("/user-register", "/register"),
+        )
+    except Exception:
+        pass
     run_query(
         """
         CREATE TABLE IF NOT EXISTS role_menu_permission_audit (
@@ -135,7 +163,8 @@ def _ensure_table():
 
 
 def _is_admin(user):
-    return user and user.get("role") == "Admin"
+    role = (user or {}).get("role")
+    return isinstance(role, str) and role.strip().lower() == "admin"
 
 
 def _known_roles():
@@ -183,7 +212,7 @@ def _validate_permissions(payload):
     if not isinstance(payload, dict):
         return None, "permissions must be an object"
 
-    valid_routes = set(ORDERED_MENU_ROUTES)
+    valid_routes = set(ORDERED_MENU_ROUTES) | set(_ROUTE_ALIASES.keys())
     normalized = {}
 
     for role, routes in payload.items():
@@ -194,9 +223,10 @@ def _validate_permissions(payload):
 
         role_routes = []
         for route in routes:
-            if route not in valid_routes:
+            canonical = _canonical_route(route)
+            if canonical not in valid_routes:
                 return None, f"Invalid route '{route}' for role '{role}'"
-            role_routes.append(route)
+            role_routes.append(canonical)
 
         normalized[role] = sorted(set(role_routes))
 
@@ -228,7 +258,7 @@ def _fetch_permissions():
     mapping = {role: [] for role in sorted(role_set)}
     for row in rows:
         role = row.get("role")
-        route = row.get("route")
+        route = _canonical_route(row.get("route"))
         if role in mapping and route in ORDERED_MENU_ROUTES:
             mapping[role].append(route)
 
@@ -242,12 +272,13 @@ def _save_permissions(mapping):
     run_query("DELETE FROM role_menu_permissions")
     for role, routes in mapping.items():
         for route in routes:
+            canonical = _canonical_route(route)
             run_query(
                 """
                 INSERT INTO role_menu_permissions (role, route, is_allowed)
                 VALUES (%s, %s, 1)
                 """,
-                (role, route),
+                (role, canonical),
             )
 
 
@@ -293,18 +324,57 @@ def _write_audit(changed_by_user_id, action, changes):
         )
 
 
+def _fetch_audit_logs(limit=200):
+    rows = run_query(
+        """
+        SELECT a.id,
+               a.changed_by_user_id,
+               u.name AS changed_by_name,
+               a.action,
+               a.role,
+               a.route,
+               a.old_allowed,
+               a.new_allowed,
+               a.changed_at
+        FROM role_menu_permission_audit a
+        LEFT JOIN users u ON u.user_id = a.changed_by_user_id
+        ORDER BY a.changed_at DESC, a.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+        fetch_all=True,
+    ) or []
+
+    return [
+        {
+            "id": int(r["id"]),
+            "changedByUserId": r["changed_by_user_id"],
+            "changedByName": r.get("changed_by_name"),
+            "action": r["action"],
+            "role": r["role"],
+            "route": r["route"],
+            "oldAllowed": bool(r["old_allowed"]),
+            "newAllowed": bool(r["new_allowed"]),
+            "changedAt": r["changed_at"].isoformat() if r.get("changed_at") else None,
+        }
+        for r in rows
+    ]
+
+
 @access_bp.route("/permissions", methods=["GET"])
 @token_required
-def get_permissions(_current_user_id):
+def get_permissions(current_user_id):
     _ensure_table()
     mapping = _fetch_permissions()
-    return success(
-        {
-            "permissions": mapping,
-            "routes": ORDERED_MENU_ROUTES,
-            "roles": sorted(mapping.keys()),
-        }
-    )
+    payload = {
+        "permissions": mapping,
+        "routes": ORDERED_MENU_ROUTES,
+        "roles": sorted(mapping.keys()),
+    }
+    user = get_user(current_user_id)
+    if _is_admin(user):
+        payload["logs"] = _fetch_audit_logs()
+    return success(payload)
 
 
 @access_bp.route("/permissions", methods=["PUT"])
@@ -326,12 +396,14 @@ def update_permissions(current_user_id):
     changes = _diff_permissions(previous, normalized)
     _save_permissions(normalized)
     _write_audit(current_user_id, "update", changes)
+    logs = _fetch_audit_logs()
     return success(
         {
             "permissions": normalized,
             "roles": sorted(normalized.keys()),
             "changes": changes,
             "changedCount": len(changes),
+            "logs": logs,
         }
     )
 
@@ -349,12 +421,14 @@ def reset_permissions(current_user_id):
     changes = _diff_permissions(previous, defaults)
     _save_permissions(defaults)
     _write_audit(current_user_id, "reset", changes)
+    logs = _fetch_audit_logs()
     return success(
         {
             "permissions": defaults,
             "roles": sorted(defaults.keys()),
             "changes": changes,
             "changedCount": len(changes),
+            "logs": logs,
         }
     )
 
@@ -374,39 +448,4 @@ def permission_audit(current_user_id):
         limit = 200
     limit = max(1, min(limit, 1000))
 
-    rows = run_query(
-        """
-        SELECT a.id,
-               a.changed_by_user_id,
-               u.name AS changed_by_name,
-               a.action,
-               a.role,
-               a.route,
-               a.old_allowed,
-               a.new_allowed,
-               a.changed_at
-        FROM role_menu_permission_audit a
-        LEFT JOIN users u ON u.user_id = a.changed_by_user_id
-        ORDER BY a.changed_at DESC, a.id DESC
-        LIMIT %s
-        """,
-        (limit,),
-        fetch_all=True,
-    ) or []
-
-    logs = [
-        {
-            "id": int(r["id"]),
-            "changedByUserId": r["changed_by_user_id"],
-            "changedByName": r.get("changed_by_name"),
-            "action": r["action"],
-            "role": r["role"],
-            "route": r["route"],
-            "oldAllowed": bool(r["old_allowed"]),
-            "newAllowed": bool(r["new_allowed"]),
-            "changedAt": r["changed_at"].isoformat() if r.get("changed_at") else None,
-        }
-        for r in rows
-    ]
-
-    return success({"logs": logs})
+    return success({"logs": _fetch_audit_logs(limit)})

@@ -77,6 +77,7 @@ def create_app() -> Flask:
     app.register_blueprint(projects_bp, url_prefix="/api/projects")
     app.register_blueprint(tasks_bp, url_prefix="/api/tasks")
     app.register_blueprint(teams_bp, url_prefix="/api/teams")
+    
     app.register_blueprint(review_bp, url_prefix="/api/review")
     app.register_blueprint(reports_bp, url_prefix="/api/reports")
     app.register_blueprint(assets_bp, url_prefix="/api/assets")

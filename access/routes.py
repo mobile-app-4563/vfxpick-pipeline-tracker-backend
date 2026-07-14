@@ -4,6 +4,7 @@ from auth.middleware import token_required
 from common.constants import USER_ROLES
 from common.db_utils import get_user, run_query
 from common.http import failure, success
+from common.options_store import ROLE_CATEGORY, list_options, seed_options
 
 access_bp = Blueprint("access", __name__)
 
@@ -121,6 +122,7 @@ def _is_admin(user):
 
 
 def _known_roles():
+    seed_options(ROLE_CATEGORY, USER_ROLES)
     rows = run_query(
         """
         SELECT DISTINCT role
@@ -134,9 +136,10 @@ def _known_roles():
         for r in rows
         if (r.get("role") or "").strip()
     }
+    configured_roles = set(list_options(ROLE_CATEGORY))
     ordered = []
     seen = set()
-    for role in USER_ROLES + sorted(dynamic_roles):
+    for role in USER_ROLES + sorted(configured_roles | dynamic_roles):
         if role and role not in seen:
             ordered.append(role)
             seen.add(role)

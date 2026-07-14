@@ -1,6 +1,9 @@
 # Fixed departments for the restructured VFXPick pipeline.
 DEPARTMENTS = ["ROTO", "PAINT", "MM", "COMP"]
 
+# Departments used for user profile/forms; extends pipeline departments.
+USER_DEPARTMENTS = [*DEPARTMENTS, "Production", "Management"]
+
 USER_ROLES = ["Admin", "Production", "Management", "Supervisor", "Team Lead", "Artist"]
 USER_STATUSES = ["Active", "Disabled"]
 ARTIST_LEVELS = ["Senior", "Mid", "Junior"]

@@ -13,12 +13,38 @@ from common.constants import (
     ARTIST_LEVELS,
     BROAD_ACCESS_ROLES,
     DEPARTMENTS,
-    USER_ROLES,
+    USER_DEPARTMENTS,
 )
 from common.db_utils import generate_prefixed_id, get_user, initials, run_query
 from common.http import failure, success
 
 teams_bp = Blueprint("teams", __name__)
+
+
+def _known_departments():
+    rows = run_query(
+        """
+        SELECT DISTINCT department
+        FROM users
+        WHERE department IS NOT NULL AND TRIM(department) <> ''
+        ORDER BY department
+        """,
+        fetch_all=True,
+    ) or []
+    dynamic_departments = [
+        (r.get("department") or "").strip()
+        for r in rows
+        if (r.get("department") or "").strip()
+    ]
+
+    ordered = []
+    seen = set()
+    for dept in USER_DEPARTMENTS + dynamic_departments:
+        if not dept or dept in seen:
+            continue
+        ordered.append(dept)
+        seen.add(dept)
+    return ordered
 
 
 def _serialize(row):
@@ -45,38 +71,41 @@ def teams(current_user_id):
     - Supervisor/Team Lead/Artist: see only their own department
     """
     user = get_user(current_user_id)
-    department = request.args.get("department")
+    requested_department = (request.args.get("department") or "").strip() or None
+    restricted_department = None
+    if user and user["role"] not in BROAD_ACCESS_ROLES:
+        restricted_department = user.get("department")
+        if requested_department and requested_department != restricted_department:
+            return failure("You are not allowed to view this department.", 403)
     
     # Build the WHERE clause
     query = """
         SELECT user_id, name, department, role, level, avatar
         FROM users
-        WHERE status = 'Active' AND department IN ('ROTO', 'PAINT', 'MM', 'COMP')
+        WHERE status = 'Active'
     """
     params = []
-    
-    # If user is not broad-access role, restrict to their department
-    if user and user["role"] not in BROAD_ACCESS_ROLES:
+
+    effective_department = restricted_department or requested_department
+    if effective_department:
         query += " AND department = %s"
-        params.append(user["department"])
-    
-    # If department is explicitly requested, validate access
-    if department:
-        if user and user["role"] not in BROAD_ACCESS_ROLES and user["department"] != department:
-            return failure("You are not allowed to view this department.", 403)
-    
+        params.append(effective_department)
+
     query += " ORDER BY department, FIELD(level, 'Senior', 'Mid', 'Junior'), name"
-    
+
     rows = run_query(query, tuple(params), fetch_all=True) or []
 
+    if effective_department:
+        department_order = [effective_department]
+    elif restricted_department:
+        department_order = [restricted_department]
+    else:
+        department_order = _known_departments()
+        if not department_order:
+            department_order = DEPARTMENTS
+
     departments = []
-    for dept in DEPARTMENTS:
-        # Skip if specific department was requested and doesn't match
-        if department and department != dept:
-            continue
-        # Skip if user is restricted to a department and it doesn't match
-        if user and user["role"] not in BROAD_ACCESS_ROLES and user["department"] != dept:
-            continue
+    for dept in department_order:
         members = [_serialize(r) for r in rows if r["department"] == dept]
         departments.append({"department": dept, "members": members})
 
@@ -102,9 +131,7 @@ def add_member(current_user_id):
 
     if not all([name, email, department]):
         return failure("name, email and department are required.", 400)
-    if department not in DEPARTMENTS:
-        return failure("Invalid department.", 400)
-    if role not in USER_ROLES:
+    if not role:
         return failure("Invalid role.", 400)
     if level and level not in ARTIST_LEVELS:
         return failure("Invalid level.", 400)

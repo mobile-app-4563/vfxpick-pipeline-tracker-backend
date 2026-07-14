@@ -3,6 +3,7 @@ from threading import Lock
 
 from mysql.connector import InterfaceError
 from mysql.connector import ProgrammingError
+from mysql.connector import DatabaseError
 from mysql.connector import pooling
 from dotenv import load_dotenv
 
@@ -47,14 +48,22 @@ def get_db():
             if _db_pool is None:
                 try:
                     _db_pool = _build_pool()
-                except (InterfaceError, ProgrammingError) as exc:
+                except (InterfaceError, ProgrammingError, DatabaseError) as exc:
+                    if isinstance(exc, DatabaseError) and getattr(exc, "errno", None) == 1130:
+                        raise RuntimeError(
+                            "Database host permission denied (1130). Use DB_HOST=127.0.0.1 or grant access for DB_USER at localhost in MariaDB."
+                        ) from exc
                     raise RuntimeError(
                         "Database pool initialization failed. Check DB_* values in .env and verify MySQL user permissions."
                     ) from exc
 
     try:
         return _db_pool.get_connection()
-    except (InterfaceError, ProgrammingError) as exc:
+    except (InterfaceError, ProgrammingError, DatabaseError) as exc:
+        if isinstance(exc, DatabaseError) and getattr(exc, "errno", None) == 1130:
+            raise RuntimeError(
+                "Database host permission denied (1130). Ensure MariaDB grants allow this DB_USER from current host."
+            ) from exc
         raise RuntimeError(
             "Database connection failed. Ensure MySQL is running and DB_* values in .env are correct."
         ) from exc

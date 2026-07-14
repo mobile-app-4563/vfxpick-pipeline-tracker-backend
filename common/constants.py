@@ -12,10 +12,10 @@ ARTIST_LEVELS = ["Senior", "Mid", "Junior"]
 SHOT_STATUSES = ["Hold", "Approved", "Awaiting Approval", "Approved Internal"]
 
 # Supervisor / team lead review status for a shot.
-SUPERVISOR_STATUSES = ["Awaiting QC", "Feedback", "Approved", "Hold", "Client FB"]
+SUPERVISOR_STATUSES = ["Feedback", "Approved", "Hold"]
 
 # Artist work status for a shot.
-ARTIST_STATUSES = ["YTS", "In Progress", "WIP Complete", "QC", "Additional"]
+ARTIST_STATUSES = ["YTS", "In Progress", "Awaiting QC", "WIP Completed", "Render & Upload Completed", "QC", "Additional"]
 
 # Roles that may view/modify any department (broad access).
 BROAD_ACCESS_ROLES = ["Admin", "Production", "Management"]

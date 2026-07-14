@@ -16,6 +16,7 @@ ORDERED_MENU_ROUTES = [
     "/assets",
     "/tasks",
     "/review",
+    "/feedback",
     "/reports",
     "/teams",
     "/notifications",
@@ -39,6 +40,7 @@ _FULL_ACCESS_DEFAULTS = {
     "/assets",
     "/tasks",
     "/review",
+    "/feedback",
     "/reports",
     "/teams",
     "/notifications",
@@ -113,6 +115,21 @@ def _ensure_table():
                         """,
                         (role, "/inventory")
                     )
+
+        has_feedback = run_query(
+            "SELECT 1 FROM role_menu_permissions WHERE route = %s LIMIT 1",
+            ("/feedback",),
+            fetch_all=True,
+        )
+        if not has_feedback:
+            for role in ["Admin", "Production", "Management", "Supervisor", "Team Lead"]:
+                run_query(
+                    """
+                    INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed)
+                    VALUES (%s, %s, 1)
+                    """,
+                    (role, "/feedback"),
+                )
     except Exception:
         pass
 

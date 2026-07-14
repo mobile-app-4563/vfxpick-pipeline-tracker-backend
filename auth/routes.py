@@ -78,6 +78,48 @@ def _merge_ordered(defaults, dynamic_values):
     return ordered
 
 
+def _distinct_values(table_name, column_name):
+    allowed = {
+        ("users", "role"),
+        ("users", "department"),
+        ("users", "level"),
+        ("shots", "department"),
+        ("shots", "status"),
+        ("shots", "supervisor_status"),
+        ("shots", "artist_status"),
+    }
+    if (table_name, column_name) not in allowed:
+        return []
+
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"""
+            SELECT DISTINCT {column_name} AS value
+            FROM {table_name}
+            WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''
+            ORDER BY {column_name}
+            """
+        )
+        rows = cursor.fetchall() or []
+        return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _merge_ordered(defaults, dynamic_values):
+    ordered = []
+    seen = set()
+    for value in list(defaults) + list(dynamic_values):
+        if not value or value in seen:
+            continue
+        ordered.append(value)
+        seen.add(value)
+    return ordered
+
+
 def _sign_token(user_id: str, role: str) -> str:
     payload = {
         "user_id": user_id,

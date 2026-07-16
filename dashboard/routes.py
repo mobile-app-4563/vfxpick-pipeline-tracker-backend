@@ -4,6 +4,8 @@ Department-wise shot tracking tables (ROTO, PAINT, MM, COMP) plus the
 "Today's Target" summary panel, and an expandable shot list per show.
 """
 
+from datetime import date, datetime
+
 from flask import Blueprint, request
 
 from auth.middleware import token_required
@@ -23,17 +25,13 @@ def invent_active_shows(_current_user_id):
 
     rows = run_query(
         """
-        SELECT CASE
-                   WHEN SUM(CASE WHEN s.status = 'Approved Internal' THEN 1 ELSE 0 END) > 0
-                       THEN 'Approved Internal'
-                   ELSE 'Approved'
-               END AS status,
+        SELECT s.status,
                sh.show_id,
                sh.show_name,
                sh.client_id,
                c.client_name,
                COUNT(*) AS shot_count,
-               COALESCE(SUM(s.client_bid), 0) AS total_mandays,
+               COALESCE(SUM(s.mandays), 0) AS total_mandays,
                MIN(s.due_date) AS min_due_date,
                MAX(s.due_date) AS max_due_date,
                GROUP_CONCAT(DISTINCT s.department ORDER BY s.department SEPARATOR ',') AS departments,
@@ -42,12 +40,27 @@ def invent_active_shows(_current_user_id):
         JOIN shows sh ON s.show_id = sh.show_id
         JOIN clients c ON sh.client_id = c.client_id
         WHERE s.status IN (%s, %s)
-        GROUP BY sh.show_id, sh.show_name, sh.client_id, c.client_name
-        ORDER BY FIELD(status, 'Approved', 'Approved Internal'), sh.show_name
+        GROUP BY s.status, sh.show_id, sh.show_name, sh.client_id, c.client_name
+        ORDER BY FIELD(s.status, 'Approved', 'Approved Internal'), sh.show_name
         """,
         tuple(statuses),
         fetch_all=True,
     ) or []
+
+    shot_rows = run_query(
+        SHOT_SELECT
+        + """
+        WHERE s.status IN (%s, %s)
+        ORDER BY FIELD(s.status, 'Approved', 'Approved Internal'), sh.show_name, s.shot_code
+        """,
+        tuple(statuses),
+        fetch_all=True,
+    ) or []
+
+    shots_by_group = {}
+    for shot in shot_rows:
+        key = (shot.get("status"), shot.get("show_id"))
+        shots_by_group.setdefault(key, []).append(shot_to_json(shot))
 
     grouped = {status: [] for status in statuses}
     for row in rows:
@@ -55,6 +68,7 @@ def invent_active_shows(_current_user_id):
         if status not in grouped:
             continue
         departments = (row.get("departments") or "")
+        key = (status, row.get("show_id"))
         grouped[status].append(
             {
                 "showId": row.get("show_id"),
@@ -68,6 +82,7 @@ def invent_active_shows(_current_user_id):
                 "maxDueDate": to_iso(row.get("max_due_date")),
                 "departments": [d for d in departments.split(",") if d],
                 "lastUpdatedAt": to_iso(row.get("last_updated_at")),
+                "shots": shots_by_group.get(key, []),
             }
         )
 
@@ -157,19 +172,26 @@ def show_shots(_current_user_id, show_id):
 @token_required
 def today_pickouts(_current_user_id):
     """Today's pickouts prioritized by urgency: due_date, department, pending bids."""
-    from datetime import date
+    date_param = (request.args.get("date") or "").strip()
+    if date_param:
+        try:
+            today = datetime.strptime(date_param, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return failure("Invalid date format. Use YYYY-MM-DD.", 400)
+    else:
+        today = date.today().isoformat()
 
-    today = str(date.today())
     query = (
         SHOT_SELECT
         + """
     WHERE DATE(s.allocated_date) = %s
+       OR DATE(s.due_date) = %s
     ORDER BY s.due_date ASC, s.department, 
              CASE WHEN s.supervisor_bid = 0 THEN 0 ELSE 1 END ASC
     """
     )
 
-    rows = run_query(query, (today,), fetch_all=True) or []
+    rows = run_query(query, (today, today), fetch_all=True) or []
     return success({"pickouts": [shot_to_json(r) for r in rows]})
 
 

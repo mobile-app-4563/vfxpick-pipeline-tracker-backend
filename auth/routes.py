@@ -16,7 +16,7 @@ from common.constants import (
     USER_DEPARTMENTS,
     USER_ROLES,
 )
-from common.db_utils import generate_prefixed_id, initials
+from common.db_utils import generate_prefixed_id, get_user, initials
 from common.http import failure, success
 from common.options_store import (
     ARTIST_LEVEL_CATEGORY,
@@ -293,3 +293,25 @@ def register():
 @token_required
 def logout(_current_user_id):
     return success({"message": "Logged out successfully"})
+
+
+@auth_bp.route("/me", methods=["GET"])
+@token_required
+def me(current_user_id):
+    user = get_user(current_user_id)
+    if not user:
+        return failure("User not found", 404)
+
+    return success(
+        {
+            "user": {
+                "userId": user["user_id"],
+                "name": user["name"],
+                "email": user["email"],
+                "department": user["department"],
+                "role": user["role"],
+                "status": user["status"],
+                "avatar": user["avatar"],
+            }
+        }
+    )

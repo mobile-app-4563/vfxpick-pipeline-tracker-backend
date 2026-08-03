@@ -1,12 +1,32 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
+from flask_compress import Compress
+from flask_caching import Cache
 
 from config import Config
+
+# Initialize extensions at module level
+compress = Compress()
+cache = Cache(
+    config={
+        "CACHE_TYPE": "SimpleCache",
+        "CACHE_DEFAULT_TIMEOUT": 300,
+    }
+)
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    # Prevent OOM from massive uploads (50 MB limit)
+    app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+    # Initialize Flask-Compress for gzip/brotli response compression
+    compress.init_app(app)
+
+    # Initialize Flask-Caching for in-memory caching
+    cache.init_app(app)
 
     # CORS Configuration
     CORS(
@@ -38,6 +58,7 @@ def create_app() -> Flask:
             "DELETE",
             "OPTIONS",
         ],
+        max_age=3600,
     )
 
     @app.after_request
@@ -52,6 +73,12 @@ def create_app() -> Flask:
             "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         )
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        # Cache static responses for 5 minutes
+        response.headers["Cache-Control"] = "no-cache"
+
+        # Close the per-request DB connection (if any)
+        from database.connection import close_request_connection
+        close_request_connection()
 
         return response
 

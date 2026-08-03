@@ -13,6 +13,7 @@ ORDERED_MENU_ROUTES = [
     "/dashboard",
     "/bidding",
     "/projects",
+    "/production-management",
     "/assets",
     "/tasks",
     "/review",
@@ -38,6 +39,7 @@ _FULL_ACCESS_DEFAULTS = {
     "/dashboard",
     "/bidding",
     "/projects",
+    "/production-management",
     "/assets",
     "/tasks",
     "/review",
@@ -157,6 +159,21 @@ def _ensure_table():
                     VALUES (%s, %s, 1)
                     """,
                     (role, "/feedback"),
+                )
+
+        has_production_management = run_query(
+            "SELECT 1 FROM role_menu_permissions WHERE route = %s LIMIT 1",
+            ("/production-management",),
+            fetch_all=True,
+        )
+        if not has_production_management:
+            for role in ["Admin", "Production", "Management", "Supervisor", "Team Lead"]:
+                run_query(
+                    """
+                    INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed)
+                    VALUES (%s, %s, 1)
+                    """,
+                    (role, "/production-management"),
                 )
     except Exception:
         pass

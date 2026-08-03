@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from flask import Blueprint, request
 
+from app import cache
 from auth.middleware import token_required
 from common.constants import DEPARTMENTS
 from common.db_utils import run_query, to_iso
@@ -20,7 +21,16 @@ dashboard_bp = Blueprint("dashboard", __name__)
 @dashboard_bp.route("/invent-active-shows", methods=["GET"])
 @token_required
 def invent_active_shows(_current_user_id):
-    """Approved/Approved Internal shows for Home with expandable details."""
+    """Approved/Approved Internal shows for Home with expandable details.
+
+    Cached for 2 minutes — this is the heaviest endpoint on the home page.
+    Pass ?refresh=1 to bypass cache.
+    """
+    if request.args.get("refresh") != "1":
+        cached = cache.get("dash_invent_active")
+        if cached is not None:
+            return cached
+
     statuses = ["Approved", "Approved Internal"]
 
     rows = run_query(
@@ -86,20 +96,30 @@ def invent_active_shows(_current_user_id):
             }
         )
 
-    return success(
-        {
-            "statuses": [
-                {"status": status, "shows": grouped.get(status, [])}
-                for status in statuses
-            ]
-        }
-    )
+    result = {
+        "statuses": [
+            {"status": status, "shows": grouped.get(status, [])}
+            for status in statuses
+        ]
+    }
+
+    response = success(result)
+    cache.set("dash_invent_active", response, timeout=120)
+    return response
 
 
 @dashboard_bp.route("/summary", methods=["GET"])
 @token_required
 def summary(_current_user_id):
-    """Per-department breakdown grouped by client + show."""
+    """Per-department breakdown grouped by client + show.
+
+    Cached for 2 minutes. Pass ?refresh=1 to bypass.
+    """
+    if request.args.get("refresh") != "1":
+        cached = cache.get("dash_summary")
+        if cached is not None:
+            return cached
+
     rows = run_query(
         """
         SELECT s.department,
@@ -145,7 +165,10 @@ def summary(_current_user_id):
             }
         )
 
-    return success({"departments": departments})
+    result = {"departments": departments}
+    response = success(result)
+    cache.set("dash_summary", response, timeout=120)
+    return response
 
 
 @dashboard_bp.route("/show/<show_id>/shots", methods=["GET"])
@@ -171,7 +194,10 @@ def show_shots(_current_user_id, show_id):
 @dashboard_bp.route("/today-pickouts", methods=["GET"])
 @token_required
 def today_pickouts(_current_user_id):
-    """Today's pickouts prioritized by urgency: due_date, department, pending bids."""
+    """Today's pickouts prioritized by urgency: due_date, department, pending bids.
+
+    Cached for 2 minutes per date. Pass ?refresh=1 to bypass.
+    """
     date_param = (request.args.get("date") or "").strip()
     if date_param:
         try:
@@ -180,6 +206,12 @@ def today_pickouts(_current_user_id):
             return failure("Invalid date format. Use YYYY-MM-DD.", 400)
     else:
         today = date.today().isoformat()
+
+    cache_key = f"dash_pickouts_{today}"
+    if request.args.get("refresh") != "1":
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
 
     query = (
         SHOT_SELECT
@@ -192,13 +224,24 @@ def today_pickouts(_current_user_id):
     )
 
     rows = run_query(query, (today, today), fetch_all=True) or []
-    return success({"pickouts": [shot_to_json(r) for r in rows]})
+    result = {"pickouts": [shot_to_json(r) for r in rows]}
+    response = success(result)
+    cache.set(cache_key, response, timeout=120)
+    return response
 
 
 @dashboard_bp.route("/artist-performance", methods=["GET"])
 @token_required
 def artist_performance(_current_user_id):
-    """Performance chart data for all active artists."""
+    """Performance chart data for all active artists.
+
+    Cached for 2 minutes. Pass ?refresh=1 to bypass.
+    """
+    if request.args.get("refresh") != "1":
+        cached = cache.get("dash_artist_perf")
+        if cached is not None:
+            return cached
+
     rows = run_query(
         """
         SELECT u.user_id,
@@ -227,4 +270,7 @@ def artist_performance(_current_user_id):
         }
         for r in rows
     ]
-    return success({"performers": performers})
+    result = {"performers": performers}
+    response = success(result)
+    cache.set("dash_artist_perf", response, timeout=120)
+    return response

@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from flask import Blueprint, request
-
 from auth.middleware import token_required
 from common.constants import (
     ARTIST_LEVELS,
@@ -16,7 +15,7 @@ from common.constants import (
     USER_DEPARTMENTS,
     USER_ROLES,
 )
-from common.db_utils import generate_prefixed_id, get_user, initials
+from common.db_utils import generate_prefixed_id, get_user, initials, run_query
 from common.http import failure, success
 from common.options_store import (
     ARTIST_LEVEL_CATEGORY,
@@ -31,7 +30,7 @@ from common.options_store import (
     seed_options,
     upsert_option,
 )
-from database.connection import get_db
+from database.connection import get_db_cursor
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -49,64 +48,15 @@ def _distinct_values(table_name, column_name):
     if (table_name, column_name) not in allowed:
         return []
 
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute(
-            f"""
-            SELECT DISTINCT {column_name} AS value
-            FROM {table_name}
-            WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''
-            ORDER BY {column_name}
-            """
-        )
-        rows = cursor.fetchall() or []
-        return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
-    finally:
-        cursor.close()
-        conn.close()
-
-
-def _merge_ordered(defaults, dynamic_values):
-    ordered = []
-    seen = set()
-    for value in list(defaults) + list(dynamic_values):
-        if not value or value in seen:
-            continue
-        ordered.append(value)
-        seen.add(value)
-    return ordered
-
-
-def _distinct_values(table_name, column_name):
-    allowed = {
-        ("users", "role"),
-        ("users", "department"),
-        ("users", "level"),
-        ("shots", "department"),
-        ("shots", "status"),
-        ("shots", "supervisor_status"),
-        ("shots", "artist_status"),
-    }
-    if (table_name, column_name) not in allowed:
-        return []
-
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute(
-            f"""
-            SELECT DISTINCT {column_name} AS value
-            FROM {table_name}
-            WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''
-            ORDER BY {column_name}
-            """
-        )
-        rows = cursor.fetchall() or []
-        return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
-    finally:
-        cursor.close()
-        conn.close()
+    rows = run_query(
+        f"""
+        SELECT DISTINCT {column_name} AS value
+        FROM {table_name}
+        WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''
+        ORDER BY {column_name}
+        """
+    )
+    return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
 
 
 def _merge_ordered(defaults, dynamic_values):
@@ -131,7 +81,20 @@ def _sign_token(user_id: str, role: str) -> str:
 
 @auth_bp.route("/options", methods=["GET"])
 def options():
-    """Return dynamic app options for forms and workflow dropdowns."""
+    """Return dynamic app options for forms and workflow dropdowns.
+
+    Cached for 5 minutes.  Pass ?refresh=1 to force a cache miss.
+    This endpoint does ~14 DB round-trips without cache — caching eliminates that.
+    """
+    from app import cache  # lazy import — app must be created first
+
+    force_refresh = request.args.get("refresh") == "1"
+    cache_key = "app_options"
+    if not force_refresh:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     seed_options(ROLE_CATEGORY, USER_ROLES)
     seed_options(DEPARTMENT_CATEGORY, USER_DEPARTMENTS)
     seed_options(PIPELINE_DEPARTMENT_CATEGORY, DEPARTMENTS)
@@ -177,7 +140,7 @@ def options():
         list_options(BROAD_ACCESS_ROLE_CATEGORY),
     )
 
-    return success(
+    payload = success(
         {
             "roles": roles,
             "departments": departments,
@@ -189,6 +152,8 @@ def options():
             "broadAccessRoles": broad_access_roles,
         }
     )
+    cache.set(cache_key, payload, timeout=300)
+    return payload
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -200,34 +165,29 @@ def login():
     if not email or not password:
         return failure("Email and password are required", 400)
 
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute("SELECT * FROM users WHERE LOWER(email) = %s", (email,))
-        user = cursor.fetchone()
-        if not user:
-            return failure("Invalid email address. User not found.", 401)
+    user = run_query(
+        "SELECT * FROM users WHERE LOWER(email) = %s", (email,), fetch_one=True
+    )
+    if not user:
+        return failure("Invalid email address. User not found.", 401)
 
-        if user["status"] == "Disabled":
-            return failure("This account has been disabled. Please contact the administrator.", 403)
+    if user["status"] == "Disabled":
+        return failure("This account has been disabled. Please contact the administrator.", 403)
 
-        if not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
-            return failure("Invalid password.", 401)
+    if not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        return failure("Invalid password.", 401)
 
-        token = _sign_token(user["user_id"], user["role"])
-        user_response = {
-            "userId": user["user_id"],
-            "name": user["name"],
-            "email": user["email"],
-            "department": user["department"],
-            "role": user["role"],
-            "status": user["status"],
-            "avatar": user["avatar"],
-        }
-        return success({"token": token, "user": user_response})
-    finally:
-        cursor.close()
-        conn.close()
+    token = _sign_token(user["user_id"], user["role"])
+    user_response = {
+        "userId": user["user_id"],
+        "name": user["name"],
+        "email": user["email"],
+        "department": user["department"],
+        "role": user["role"],
+        "status": user["status"],
+        "avatar": user["avatar"],
+    }
+    return success({"token": token, "user": user_response})
 
 
 @auth_bp.route("/register", methods=["POST"])
@@ -247,46 +207,41 @@ def register():
     upsert_option(ROLE_CATEGORY, role)
     upsert_option(DEPARTMENT_CATEGORY, department)
 
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute("SELECT user_id FROM users WHERE LOWER(email) = %s", (email,))
-        if cursor.fetchone():
-            return failure("Email is already registered.", 409)
+    existing = run_query(
+        "SELECT user_id FROM users WHERE LOWER(email) = %s", (email,), fetch_one=True
+    )
+    if existing:
+        return failure("Email is already registered.", 409)
 
-        user_id = generate_prefixed_id("users", "user_id", "USR", 100)
-        avatar = initials(full_name)
-        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user_id = generate_prefixed_id("users", "user_id", "USR", 100)
+    avatar = initials(full_name)
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-        cursor.execute(
-            """
-            INSERT INTO users (user_id, name, email, department, password_hash, role, status, avatar, phone, employee_id_ext)
-            VALUES (%s, %s, %s, %s, %s, %s, 'Active', %s, %s, %s)
-            """,
-            (user_id, full_name, email, department, password_hash, role, avatar, phone, employee_id),
-        )
-        cursor.execute("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
-        conn.commit()
+    run_query(
+        """
+        INSERT INTO users (user_id, name, email, department, password_hash, role, status, avatar, phone, employee_id_ext)
+        VALUES (%s, %s, %s, %s, %s, %s, 'Active', %s, %s, %s)
+        """,
+        (user_id, full_name, email, department, password_hash, role, avatar, phone, employee_id),
+    )
+    run_query("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
 
-        token = _sign_token(user_id, role)
-        return success(
-            {
-                "token": token,
-                "user": {
-                    "userId": user_id,
-                    "name": full_name,
-                    "email": email,
-                    "department": department,
-                    "role": role,
-                    "status": "Active",
-                    "avatar": avatar,
-                },
+    token = _sign_token(user_id, role)
+    return success(
+        {
+            "token": token,
+            "user": {
+                "userId": user_id,
+                "name": full_name,
+                "email": email,
+                "department": department,
+                "role": role,
+                "status": "Active",
+                "avatar": avatar,
             },
-            201,
-        )
-    finally:
-        cursor.close()
-        conn.close()
+        },
+        201,
+    )
 
 
 @auth_bp.route("/logout", methods=["POST"])

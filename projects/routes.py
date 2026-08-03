@@ -6,6 +6,8 @@ restricted to their own department, while Admin / Production / Management have
 broad access to every department.
 """
 
+from datetime import datetime
+
 from flask import Blueprint, request
 
 from auth.middleware import token_required
@@ -19,6 +21,7 @@ from common.constants import (
 from common.db_utils import generate_prefixed_id, get_user, run_query
 from common.http import failure, success
 from common.serializers import SHOT_SELECT, shot_to_json
+from database.connection import get_db
 
 projects_bp = Blueprint("projects", __name__)
 
@@ -136,12 +139,17 @@ def create_show(current_user_id, client_id):
 @projects_bp.route("/shots", methods=["GET"])
 @token_required
 def list_shots(current_user_id):
-    """List shots filtered by department / client / show / status with access control."""
+    """List shots filtered by department / client / show / status with pagination."""
     user = get_user(current_user_id)
     department = request.args.get("department")
     client_id = request.args.get("clientId")
     show_id = request.args.get("showId")
     status = request.args.get("status")
+    limit = request.args.get("limit", type=int, default=500)
+    offset = request.args.get("offset", type=int, default=0)
+
+    # Clamp limit to avoid OOM
+    limit = min(limit, 2000)
 
     allowed = _accessible_departments(user)
     if not allowed:
@@ -171,8 +179,28 @@ def list_shots(current_user_id):
         params.append(status)
 
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    rows = run_query(SHOT_SELECT + where + " ORDER BY s.shot_code", tuple(params), fetch_all=True) or []
-    return success({"shots": [shot_to_json(r) for r in rows]})
+
+    # Count total matching rows
+    count_row = run_query(
+        "SELECT COUNT(*) AS total FROM shots s JOIN shows sh ON s.show_id = sh.show_id" + where,
+        tuple(params),
+        fetch_one=True,
+    )
+    total = count_row["total"] if count_row else 0
+
+    # Fetch paginated rows
+    rows = run_query(
+        SHOT_SELECT + where + " ORDER BY s.shot_code LIMIT %s OFFSET %s",
+        tuple(list(params) + [limit, offset]),
+        fetch_all=True,
+    ) or []
+
+    return success({
+        "shots": [shot_to_json(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
 
 
 @projects_bp.route("/shots/<shot_id>", methods=["GET"])
@@ -216,8 +244,14 @@ def create_shot(current_user_id):
         """
         INSERT INTO shots
             (shot_id, show_id, department, shot_code, frame_in, frame_out,
-             supervisor_bid, client_bid, client_eta, notes, status, description, due_date, client_feedback)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             total_frames, supervisor_bid, client_bid, client_eta, notes, status,
+             description, due_date, client_feedback,
+             coordinator, level_of_shot, allocation_date, allocation_eta,
+             starting_date, complete_date, daily_wip,
+             consumed_mandays, saved_mandays, approved_version, approved_by,
+             comments, complexity, from_roto, from_paint, from_mm, from_comp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             shot_id,
@@ -226,6 +260,7 @@ def create_shot(current_user_id):
             shot_code,
             data.get("frameIn") or 0,
             data.get("frameOut") or 0,
+            data.get("totalFrames") or 0,
             data.get("supervisorBid") or 0,
             data.get("clientBid") or 0,
             data.get("clientEta"),
@@ -234,6 +269,23 @@ def create_shot(current_user_id):
             data.get("description"),
             data.get("dueDate"),
             data.get("clientFeedback"),
+            data.get("coordinator"),
+            data.get("levelOfShot"),
+            data.get("allocationDate"),
+            data.get("allocationEta"),
+            data.get("startingDate"),
+            data.get("completeDate"),
+            data.get("dailyWip") or 0,
+            data.get("consumedMandays") or 0,
+            data.get("savedMandays") or 0,
+            data.get("approvedVersion"),
+            data.get("approvedBy"),
+            data.get("comments"),
+            data.get("complexity"),
+            data.get("fromRoto"),
+            data.get("fromPaint"),
+            data.get("fromMm"),
+            data.get("fromComp"),
         ),
     )
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
@@ -254,6 +306,7 @@ def update_shot(current_user_id, shot_id):
         "shotCode": "shot_code",
         "frameIn": "frame_in",
         "frameOut": "frame_out",
+        "totalFrames": "total_frames",
         "supervisorBid": "supervisor_bid",
         "clientBid": "client_bid",
         "clientEta": "client_eta",
@@ -262,6 +315,23 @@ def update_shot(current_user_id, shot_id):
         "description": "description",
         "dueDate": "due_date",
         "clientFeedback": "client_feedback",
+        "coordinator": "coordinator",
+        "levelOfShot": "level_of_shot",
+        "allocationDate": "allocation_date",
+        "allocationEta": "allocation_eta",
+        "startingDate": "starting_date",
+        "completeDate": "complete_date",
+        "dailyWip": "daily_wip",
+        "consumedMandays": "consumed_mandays",
+        "savedMandays": "saved_mandays",
+        "approvedVersion": "approved_version",
+        "approvedBy": "approved_by",
+        "comments": "comments",
+        "complexity": "complexity",
+        "fromRoto": "from_roto",
+        "fromPaint": "from_paint",
+        "fromMm": "from_mm",
+        "fromComp": "from_comp",
     }
     sets = []
     params = []
@@ -313,18 +383,71 @@ def delete_shot(current_user_id, shot_id):
     return success({"message": "Shot deleted", "shotId": shot_id})
 
 
+@projects_bp.route("/shots/bulk-delete", methods=["POST"])
+@token_required
+def bulk_delete_shots(current_user_id):
+    """Delete multiple shots in a single request.
+    
+    Expects JSON: {"shotIds": ["SH001", "SH002", ...]}
+    Deletes are performed in a single transaction.  Returns counts of
+    deleted and skipped (not-found / access-denied) shot IDs.
+    """
+    body = request.get_json(silent=True) or {}
+    shot_ids = body.get("shotIds", [])
+    if not shot_ids or not isinstance(shot_ids, list):
+        return failure("shotIds (list) is required.", 400)
+
+    user = get_user(current_user_id)
+    deleted = 0
+    skipped = 0
+    cnx = get_db()
+    try:
+        cnx.autocommit = False
+        with cnx.cursor() as cur:
+            for sid in shot_ids:
+                cur.execute(
+                    "SELECT department FROM shots WHERE shot_id = %s", (sid,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    skipped += 1
+                    continue
+                if not _can_access(user, row[0]):
+                    skipped += 1
+                    continue
+                cur.execute("DELETE FROM shots WHERE shot_id = %s", (sid,))
+                deleted += 1
+        cnx.commit()
+    except Exception:
+        cnx.rollback()
+        raise
+    finally:
+        cnx.close()
+
+    return success({
+        "message": f"Deleted {deleted} shot(s), skipped {skipped}.",
+        "deleted": deleted,
+        "skipped": skipped,
+    })
+
+
 @projects_bp.route("/shots/bulk-upsert", methods=["POST"])
 @token_required
 def bulk_upsert_shots(current_user_id):
-    """Create or update shots from imported rows (used by Excel import flow)."""
+    """Create or update shots from imported rows (used by Excel import flow).
+
+    Runs inside a single database transaction so that either all rows succeed
+    together or all are rolled back.  Uses one connection for the entire
+    operation to avoid pool exhaustion.
+    """
     user = get_user(current_user_id)
     data = request.get_json(silent=True) or {}
     rows = data.get("rows") or []
     if not isinstance(rows, list) or not rows:
         return failure("rows is required and must be a non-empty array.", 400)
 
-    created = 0
-    updated = 0
+    # ── Pre-validate all rows (without touching the DB) ──────────────────
+    valid_rows = []
     errors = []
 
     for idx, row in enumerate(rows, start=1):
@@ -337,23 +460,13 @@ def bulk_upsert_shots(current_user_id):
         shot_code = (row.get("shotCode") or "").strip()
 
         if not show_id or not department or not shot_code:
-            errors.append(
-                f"Row {idx}: showId, department and shotCode are required."
-            )
+            errors.append(f"Row {idx}: showId, department and shotCode are required.")
             continue
         if department not in DEPARTMENTS:
             errors.append(f"Row {idx}: invalid department '{department}'.")
             continue
         if not _can_access(user, department):
-            errors.append(
-                f"Row {idx}: you are not allowed to modify department '{department}'."
-            )
-            continue
-
-        if not run_query(
-            "SELECT show_id FROM shows WHERE show_id = %s", (show_id,), fetch_one=True
-        ):
-            errors.append(f"Row {idx}: show '{show_id}' not found.")
+            errors.append(f"Row {idx}: you are not allowed to modify department '{department}'.")
             continue
 
         status = row.get("status") or "Awaiting Approval"
@@ -368,108 +481,176 @@ def bulk_upsert_shots(current_user_id):
 
         supervisor_status = row.get("supervisorStatus")
         if supervisor_status is not None and supervisor_status not in SUPERVISOR_STATUSES:
-            errors.append(
-                f"Row {idx}: invalid supervisorStatus '{supervisor_status}'."
-            )
+            errors.append(f"Row {idx}: invalid supervisorStatus '{supervisor_status}'.")
             continue
 
-        existing = run_query(
-            """
-            SELECT shot_id
-            FROM shots
-            WHERE show_id = %s AND department = %s AND shot_code = %s
-            LIMIT 1
-            """,
-            (show_id, department, shot_code),
-            fetch_one=True,
+        valid_rows.append((idx, show_id, department, shot_code, row, status, artist_status, supervisor_status))
+
+    if not valid_rows:
+        return success({"created": 0, "updated": 0, "errors": errors})
+
+    # ── Get ONE connection for the entire transaction ─────────────────────
+    conn = get_db()
+    conn.autocommit = False
+    created = 0
+    updated = 0
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        # ── Validate shows once per unique show_id (not per row) ──────
+        show_cache = set()
+        for _, show_id, *_ in valid_rows:
+            if show_id not in show_cache:
+                cursor.execute("SELECT show_id FROM shows WHERE show_id = %s", (show_id,))
+                if not cursor.fetchone():
+                    errors.append(f"Show '{show_id}' not found.")
+                    # Mark all rows for this show as invalid
+                else:
+                    show_cache.add(show_id)
+
+        # ── Batch-fetch existing shots for this show+department ──────────
+        # Group by (show_id, department) so we only do one SELECT per group
+        existing_map = {}  # (show_id, department, shot_code) -> shot_id
+        unique_keys = {(show_id, department) for _, show_id, department, *_ in valid_rows}
+        for show_id, dept in unique_keys:
+            if show_id not in show_cache:
+                continue
+            cursor.execute(
+                "SELECT shot_id, show_id, department, shot_code FROM shots "
+                "WHERE show_id = %s AND department = %s",
+                (show_id, dept),
+            )
+            for r in cursor.fetchall():
+                existing_map[(r["show_id"], r["department"], r["shot_code"])] = r["shot_id"]
+
+        # ── Update / Insert each row ────────────────────────────────────
+        update_sql = """
+            UPDATE shots
+            SET frame_in = %s, frame_out = %s, total_frames = %s,
+                supervisor_bid = %s, client_bid = %s, client_eta = %s,
+                notes = %s, status = %s, description = %s, due_date = %s,
+                supervisor_status = %s, artist_status = %s, artist_bid = %s,
+                artist_eta = %s, mandays = %s, allocated_date = %s,
+                client_feedback = %s, artist_id = %s, coordinator = %s,
+                level_of_shot = %s, allocation_date = %s, allocation_eta = %s,
+                starting_date = %s, complete_date = %s, daily_wip = %s,
+                consumed_mandays = %s, saved_mandays = %s,
+                approved_version = %s, approved_by = %s, comments = %s,
+                complexity = %s, from_roto = %s, from_paint = %s,
+                from_mm = %s, from_comp = %s
+            WHERE shot_id = %s
+        """
+
+        insert_sql = """
+            INSERT INTO shots
+                (shot_id, show_id, department, shot_code, frame_in, frame_out,
+                 total_frames, supervisor_bid, client_bid, client_eta, notes, status,
+                 description, due_date, supervisor_status, artist_status, artist_bid,
+                 artist_eta, mandays, allocated_date, client_feedback, artist_id,
+                 coordinator, level_of_shot, allocation_date, allocation_eta,
+                 starting_date, complete_date, daily_wip,
+                 consumed_mandays, saved_mandays, approved_version, approved_by,
+                 comments, complexity, from_roto, from_paint, from_mm, from_comp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        upsert_params = _build_upsert_params()
+        for idx, show_id, department, shot_code, row, status, artist_status, supervisor_status in valid_rows:
+            if show_id not in show_cache:
+                errors.append(f"Row {idx}: show '{show_id}' not found.")
+                continue
+
+            existing_key = (show_id, department, shot_code)
+            params = upsert_params(row, show_id, department, shot_code, status, artist_status, supervisor_status)
+
+            if existing_key in existing_map:
+                cursor.execute(update_sql, (*params, existing_map[existing_key]))
+                updated += 1
+            else:
+                shot_id = generate_prefixed_id_cursor(cursor, "shots", "shot_id", "SHT", 0)
+                cursor.execute(insert_sql, (shot_id, show_id, department, shot_code, *params))
+                created += 1
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        return failure(f"Bulk upsert failed (rolled back): {str(exc)}", 500)
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return success({"created": created, "updated": updated, "errors": errors})
+
+
+def generate_prefixed_id_cursor(cursor, table_name, id_column, prefix, start_number):
+    """Generate an ID using an existing cursor (inside a transaction)."""
+    cursor.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}")
+    row = cursor.fetchone()
+    return f"{prefix}{start_number + row['cnt'] + 1}"
+
+
+def _build_upsert_params():
+    """Build the ordered param tuple for INSERT/UPDATE from a single import row.
+
+    Returns a callable that takes the per-row values and returns a flat tuple.
+    """
+    def _to_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _to_float(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def params(row, show_id, department, shot_code, status, artist_status, supervisor_status):
+        return (
+            _to_int(row.get("frameIn")),
+            _to_int(row.get("frameOut")),
+            _to_int(row.get("totalFrames")),
+            _to_float(row.get("supervisorBid")),
+            _to_float(row.get("clientBid")),
+            row.get("clientEta"),
+            row.get("notes"),
+            status,
+            row.get("description"),
+            row.get("dueDate"),
+            supervisor_status,
+            artist_status,
+            _to_float(row.get("artistBid")),
+            row.get("artistEta"),
+            _to_float(row.get("mandays")),
+            row.get("allocatedDate"),
+            row.get("clientFeedback"),
+            row.get("artistId"),
+            row.get("coordinator"),
+            row.get("levelOfShot"),
+            row.get("allocationDate"),
+            row.get("allocationEta"),
+            row.get("startingDate"),
+            row.get("completeDate"),
+            _to_float(row.get("dailyWip")),
+            _to_float(row.get("consumedMandays")),
+            _to_float(row.get("savedMandays")),
+            row.get("approvedVersion"),
+            row.get("approvedBy"),
+            row.get("comments"),
+            row.get("complexity"),
+            row.get("fromRoto"),
+            row.get("fromPaint"),
+            row.get("fromMm"),
+            row.get("fromComp"),
         )
-
-        if existing:
-            run_query(
-                """
-                UPDATE shots
-                SET frame_in = %s,
-                    frame_out = %s,
-                    supervisor_bid = %s,
-                    client_bid = %s,
-                    client_eta = %s,
-                    notes = %s,
-                    status = %s,
-                    description = %s,
-                    due_date = %s,
-                    supervisor_status = %s,
-                    artist_status = %s,
-                    artist_bid = %s,
-                    artist_eta = %s,
-                    mandays = %s,
-                    allocated_date = %s,
-                    client_feedback = %s,
-                    artist_id = %s
-                WHERE shot_id = %s
-                """,
-                (
-                    _to_int(row.get("frameIn")),
-                    _to_int(row.get("frameOut")),
-                    _to_float(row.get("supervisorBid")),
-                    _to_float(row.get("clientBid")),
-                    row.get("clientEta"),
-                    row.get("notes"),
-                    status,
-                    row.get("description"),
-                    row.get("dueDate"),
-                    supervisor_status,
-                    artist_status,
-                    _to_float(row.get("artistBid")),
-                    row.get("artistEta"),
-                    _to_float(row.get("mandays")),
-                    row.get("allocatedDate"),
-                    row.get("clientFeedback"),
-                    row.get("artistId"),
-                    existing["shot_id"],
-                ),
-            )
-            updated += 1
-        else:
-            shot_id = generate_prefixed_id("shots", "shot_id", "SHT", 0)
-            run_query(
-                """
-                INSERT INTO shots
-                    (shot_id, show_id, department, shot_code, frame_in, frame_out,
-                     supervisor_bid, client_bid, client_eta, notes, status, description,
-                     due_date, supervisor_status, artist_status, artist_bid, artist_eta,
-                     mandays, allocated_date, client_feedback, artist_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    shot_id,
-                    show_id,
-                    department,
-                    shot_code,
-                    _to_int(row.get("frameIn")),
-                    _to_int(row.get("frameOut")),
-                    _to_float(row.get("supervisorBid")),
-                    _to_float(row.get("clientBid")),
-                    row.get("clientEta"),
-                    row.get("notes"),
-                    status,
-                    row.get("description"),
-                    row.get("dueDate"),
-                    supervisor_status,
-                    artist_status,
-                    _to_float(row.get("artistBid")),
-                    row.get("artistEta"),
-                    _to_float(row.get("mandays")),
-                    row.get("allocatedDate"),
-                    row.get("clientFeedback"),
-                    row.get("artistId"),
-                ),
-            )
-            created += 1
-
-    return success(
-        {
-            "created": created,
-            "updated": updated,
-            "errors": errors,
-        }
-    )
+    return params

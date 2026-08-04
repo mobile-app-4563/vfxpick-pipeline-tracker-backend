@@ -6,8 +6,11 @@ restricted to their own department, while Admin / Production / Management have
 broad access to every department.
 """
 
+import re
+import secrets
 from datetime import datetime
 
+import bcrypt
 from flask import Blueprint, request
 
 from auth.middleware import token_required
@@ -51,6 +54,180 @@ def _to_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# Tokens that mean "no artist assigned" — never resolve or auto-create a user.
+_EMPTY_ARTIST_TOKENS = {
+    "", "-", "--", "n/a", "na", "none", "null", "nil", "0",
+    "unassigned", "not assigned", "not_assigned", "notassigned",
+    "tbd", "todo", "pending",
+}
+
+
+def _slugify_artist_name(text):
+    """Turn a display name into a lowercase, dot-separated slug."""
+    slug = re.sub(r"[^a-z0-9]+", ".", text.lower()).strip(".")
+    return slug or "artist"
+
+
+def _next_user_id(cursor):
+    """Return the next free USR-prefixed user id (count-based, collision-safe)."""
+    cursor.execute("SELECT COUNT(*) AS cnt FROM users")
+    cnt = cursor.fetchone()["cnt"] or 0
+    candidate = 100 + cnt + 1
+    while True:
+        uid = f"USR{candidate}"
+        cursor.execute("SELECT user_id FROM users WHERE user_id = %s", (uid,))
+        if not cursor.fetchone():
+            return uid
+        candidate += 1
+
+
+def _create_import_user(cursor, name, department):
+    """Create a placeholder artist user so the imported name is persisted.
+
+    The user gets a random (unusable) password and a unique @import.local
+    email, so the name always survives on the shot and can be re-linked to a
+    real account later.  Runs inside the import transaction — if the batch is
+    rolled back the placeholder is rolled back with it.
+    """
+    user_id = _next_user_id(cursor)
+    slug = _slugify_artist_name(name)
+    email = f"{slug}@import.local"
+    suffix = 1
+    while True:
+        cursor.execute("SELECT user_id FROM users WHERE email = %s", (email,))
+        if not cursor.fetchone():
+            break
+        suffix += 1
+        email = f"{slug}{suffix}@import.local"
+    password_hash = bcrypt.hashpw(
+        secrets.token_urlsafe(24).encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+    avatar = "".join(part[0].upper() for part in name.split() if part)[:2] or "A"
+    cursor.execute(
+        """
+        INSERT INTO users
+            (user_id, name, email, department, password_hash, role, status, avatar)
+        VALUES (%s, %s, %s, %s, %s, 'Artist', 'Active', %s)
+        """,
+        (user_id, name, email, department, password_hash, avatar),
+    )
+    try:
+        cursor.execute("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
+    except Exception:
+        # user_settings is optional; never let a missing table fail the batch.
+        pass
+    return user_id
+
+
+def _lookup_user_id(cursor, cache, key, query, params):
+    """Memoized single-row user_id lookup; returns None when unmatched."""
+    if key in cache:
+        return cache[key]
+    cursor.execute(query, params)
+    row = cursor.fetchone()
+    resolved = row["user_id"] if row else None
+    cache[key] = resolved
+    return resolved
+
+
+def _resolve_artist_id(cursor, artist_id, artist_name, department, cache):
+    """Resolve an imported artist to a users.user_id.
+
+    Match order:
+      1. explicit artistId (preferred),
+      2. exact users.name (case-insensitive, whitespace-normalized),
+      3. email local-part (john.doe vs john.doe@studio.com),
+      4. employee_id_ext,
+      5. first name, unique within the shot's department,
+      6. auto-create a placeholder Artist user so the name is always kept.
+
+    Returns (user_id_or_None, note_or_None).  Notes are informational only
+    (e.g. "created new user ..."); they never fail the batch.
+    """
+    raw_id = (artist_id or "").strip() if artist_id else ""
+    name = (artist_name or "").strip() if artist_name else ""
+    normalized = " ".join(name.split()) if name else ""
+    if normalized.lower() in _EMPTY_ARTIST_TOKENS:
+        normalized = ""
+
+    # 1) Explicit artistId (fall through to name matching when it fails)
+    if raw_id:
+        key = ("id", raw_id.lower())
+        resolved = _lookup_user_id(
+            cursor,
+            cache,
+            key,
+            "SELECT user_id FROM users WHERE user_id = %s LIMIT 1",
+            (raw_id,),
+        )
+        if resolved:
+            return resolved, None
+        if not normalized:
+            return None, None
+
+    if not normalized:
+        return None, None
+    key = ("name", normalized.lower())
+    if key in cache:
+        return cache[key], None
+
+    # 2) Exact name (case-insensitive, whitespace-normalized)
+    resolved = _lookup_user_id(
+        cursor,
+        cache,
+        key,
+        "SELECT user_id FROM users WHERE LOWER(TRIM(name)) = %s LIMIT 1",
+        (normalized.lower(),),
+    )
+    if resolved:
+        return resolved, None
+
+    # 3) Email local-part
+    resolved = _lookup_user_id(
+        cursor,
+        cache,
+        ("email", normalized.lower()),
+        "SELECT user_id FROM users "
+        "WHERE LOWER(SUBSTRING_INDEX(email, '@', 1)) = %s LIMIT 1",
+        (normalized.lower(),),
+    )
+    if resolved:
+        cache[key] = resolved
+        return resolved, None
+
+    # 4) employee_id_ext
+    resolved = _lookup_user_id(
+        cursor,
+        cache,
+        ("emp", normalized.lower()),
+        "SELECT user_id FROM users "
+        "WHERE LOWER(TRIM(employee_id_ext)) = %s LIMIT 1",
+        (normalized.lower(),),
+    )
+    if resolved:
+        cache[key] = resolved
+        return resolved, None
+
+    # 5) First name, unique within the shot's department
+    first = normalized.split(" ", 1)[0].lower()
+    if first and first != normalized.lower():
+        cursor.execute(
+            "SELECT user_id FROM users "
+            "WHERE LOWER(TRIM(SUBSTRING_INDEX(name, ' ', 1))) = %s "
+            "AND department = %s LIMIT 2",
+            (first, department),
+        )
+        rows = cursor.fetchall()
+        if len(rows) == 1:
+            cache[key] = rows[0]["user_id"]
+            return rows[0]["user_id"], None
+
+    # 6) Last resort: create a placeholder user so the name is persisted
+    new_id = _create_import_user(cursor, normalized[:95], department)
+    cache[key] = new_id
+    return new_id, f"artist '{normalized}' not found — created new user ({new_id})"
 
 
 @projects_bp.route("/departments", methods=["GET"])
@@ -449,6 +626,7 @@ def bulk_upsert_shots(current_user_id):
     # ── Pre-validate all rows (without touching the DB) ──────────────────
     valid_rows = []
     errors = []
+    notes = []
 
     for idx, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -487,7 +665,7 @@ def bulk_upsert_shots(current_user_id):
         valid_rows.append((idx, show_id, department, shot_code, row, status, artist_status, supervisor_status))
 
     if not valid_rows:
-        return success({"created": 0, "updated": 0, "errors": errors})
+        return success({"created": 0, "updated": 0, "errors": errors, "notes": notes})
 
     # ── Get ONE connection for the entire transaction ─────────────────────
     conn = get_db()
@@ -558,13 +736,39 @@ def bulk_upsert_shots(current_user_id):
         """
 
         upsert_params = _build_upsert_params()
+        artist_cache = {}
         for idx, show_id, department, shot_code, row, status, artist_status, supervisor_status in valid_rows:
             if show_id not in show_cache:
                 errors.append(f"Row {idx}: show '{show_id}' not found.")
                 continue
 
+            artist_id, artist_note = _resolve_artist_id(
+                cursor,
+                row.get("artistId"),
+                row.get("artistName"),
+                department,
+                artist_cache,
+            )
+            artist_name_raw = (row.get("artistName") or "").strip()
+            if artist_name_raw and not artist_id:
+                errors.append(
+                    f"Row {idx}: artist '{artist_name_raw}' was not found in "
+                    f"users; shot imported without an artist."
+                )
+            elif artist_note:
+                notes.append(f"Row {idx}: {artist_note}")
+
             existing_key = (show_id, department, shot_code)
-            params = upsert_params(row, show_id, department, shot_code, status, artist_status, supervisor_status)
+            params = upsert_params(
+                row,
+                show_id,
+                department,
+                shot_code,
+                status,
+                artist_status,
+                supervisor_status,
+                artist_id,
+            )
 
             if existing_key in existing_map:
                 cursor.execute(update_sql, (*params, existing_map[existing_key]))
@@ -588,7 +792,7 @@ def bulk_upsert_shots(current_user_id):
         except Exception:
             pass
 
-    return success({"created": created, "updated": updated, "errors": errors})
+    return success({"created": created, "updated": updated, "errors": errors, "notes": notes})
 
 
 def generate_prefixed_id_cursor(cursor, table_name, id_column, prefix, start_number):
@@ -615,7 +819,7 @@ def _build_upsert_params():
         except (TypeError, ValueError):
             return default
 
-    def params(row, show_id, department, shot_code, status, artist_status, supervisor_status):
+    def params(row, show_id, department, shot_code, status, artist_status, supervisor_status, artist_id):
         return (
             _to_int(row.get("frameIn")),
             _to_int(row.get("frameOut")),
@@ -634,7 +838,7 @@ def _build_upsert_params():
             _to_float(row.get("mandays")),
             row.get("allocatedDate"),
             row.get("clientFeedback"),
-            row.get("artistId"),
+            artist_id,
             row.get("coordinator"),
             row.get("levelOfShot"),
             row.get("allocationDate"),

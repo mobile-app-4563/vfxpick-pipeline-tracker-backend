@@ -2,6 +2,17 @@
 -- VFXPick Pipeline Restructure - Full Setup (Database + Schema + Seed)
 -- Run this file once in MySQL to create everything end-to-end.
 -- Domain: Departments (ROTO, PAINT, MM, COMP) -> Clients -> Shows -> Shots
+--
+-- This is the single source of truth. It includes:
+--   * All shots Excel/import columns (coordinator, total_frames,
+--     allocation/starting/complete dates, daily_wip, mandays,
+--     approved_*, comments, complexity, from_* cross-dept fields)
+--   * chat_messages / attachments / notifications tables
+--   * Performance composite indexes on shots (formerly separate
+--     migration_perf_indexes.sql)
+-- The old standalone migrations (migration_001_add_excel_fields.sql,
+-- migration_002_ensure_content_tables.sql, migration_perf_indexes.sql)
+-- are consolidated here and should no longer be needed.
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS vfxpick_pipeline
@@ -144,7 +155,13 @@ CREATE TABLE shots (
     INDEX idx_shots_department (department),
     INDEX idx_shots_status (status),
     INDEX idx_shots_artist (artist_id),
-    INDEX idx_shots_due (due_date)
+    INDEX idx_shots_due (due_date),
+    -- Performance composite indexes (formerly migration_perf_indexes.sql)
+    INDEX idx_shots_show_dept (show_id, department),
+    INDEX idx_shots_dept_status (department, status),
+    INDEX idx_shots_supervisor_status (supervisor_status),
+    INDEX idx_shots_artist_status (artist_status),
+    INDEX idx_shots_show_dept_code (show_id, department, shot_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================

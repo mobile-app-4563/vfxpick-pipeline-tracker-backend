@@ -25,6 +25,7 @@ ORDERED_MENU_ROUTES = [
     "/hrms",
     "/access-provider",
     "/inventory",
+    "/profile",
 ]
 
 _ARTIST_DEFAULTS = {
@@ -32,6 +33,7 @@ _ARTIST_DEFAULTS = {
     "/dashboard",
     "/tasks",
     "/notifications",
+    "/profile",
 }
 
 _FULL_ACCESS_DEFAULTS = {
@@ -50,6 +52,7 @@ _FULL_ACCESS_DEFAULTS = {
     "/user-register",
     "/hrms",
     "/inventory",
+    "/profile",
 }
 
 _FULL_ACCESS_ROLES = {"Supervisor", "Team Lead", "Admin", "Production", "Management"}
@@ -66,6 +69,8 @@ def _canonical_route(route):
 def _apply_route_invariants(mapping):
     for role, routes in list(mapping.items()):
         route_set = set(routes or [])
+        # /profile is a personal menu every user needs — never revocable.
+        route_set.add("/profile")
         if role in _FULL_ACCESS_ROLES:
             route_set.add("/hrms")
         if role == "Admin":

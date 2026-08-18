@@ -8,7 +8,7 @@ from datetime import date, datetime
 
 from flask import Blueprint, request
 
-from app import cache
+from common.cache_instance import cache
 from auth.middleware import token_required
 from common.constants import DEPARTMENTS
 from common.db_utils import run_query, to_iso

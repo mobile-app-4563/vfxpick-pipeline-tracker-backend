@@ -426,9 +426,9 @@ def create_shot(current_user_id):
              coordinator, level_of_shot, allocation_date, allocation_eta,
              starting_date, complete_date, daily_wip,
              consumed_mandays, saved_mandays, approved_version, approved_by,
-             comments, complexity, from_roto, from_paint, from_mm, from_comp)
+             comments, complexity, priority, from_roto, from_paint, from_mm, from_comp)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             shot_id,
@@ -459,6 +459,7 @@ def create_shot(current_user_id):
             data.get("approvedBy"),
             data.get("comments"),
             data.get("complexity"),
+            data.get("priority"),
             data.get("fromRoto"),
             data.get("fromPaint"),
             data.get("fromMm"),
@@ -505,6 +506,7 @@ def update_shot(current_user_id, shot_id):
         "approvedBy": "approved_by",
         "comments": "comments",
         "complexity": "complexity",
+        "priority": "priority",
         "fromRoto": "from_roto",
         "fromPaint": "from_paint",
         "fromMm": "from_mm",
@@ -580,7 +582,7 @@ def bulk_delete_shots(current_user_id):
     cnx = get_db()
     try:
         cnx.autocommit = False
-        with cnx.cursor() as cur:
+        with cnx.cursor(buffered=True) as cur:
             for sid in shot_ids:
                 cur.execute(
                     "SELECT department FROM shots WHERE shot_id = %s", (sid,)
@@ -674,7 +676,7 @@ def bulk_upsert_shots(current_user_id):
     updated = 0
 
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(dictionary=True, buffered=True)
 
         # ── Validate shows once per unique show_id (not per row) ──────
         show_cache = set()
@@ -715,7 +717,7 @@ def bulk_upsert_shots(current_user_id):
                 starting_date = %s, complete_date = %s, daily_wip = %s,
                 consumed_mandays = %s, saved_mandays = %s,
                 approved_version = %s, approved_by = %s, comments = %s,
-                complexity = %s, from_roto = %s, from_paint = %s,
+                complexity = %s, priority = %s, from_roto = %s, from_paint = %s,
                 from_mm = %s, from_comp = %s
             WHERE shot_id = %s
         """
@@ -729,10 +731,10 @@ def bulk_upsert_shots(current_user_id):
                  coordinator, level_of_shot, allocation_date, allocation_eta,
                  starting_date, complete_date, daily_wip,
                  consumed_mandays, saved_mandays, approved_version, approved_by,
-                 comments, complexity, from_roto, from_paint, from_mm, from_comp)
+                 comments, complexity, priority, from_roto, from_paint, from_mm, from_comp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         upsert_params = _build_upsert_params()
@@ -852,6 +854,7 @@ def _build_upsert_params():
             row.get("approvedBy"),
             row.get("comments"),
             row.get("complexity"),
+            row.get("priority"),
             row.get("fromRoto"),
             row.get("fromPaint"),
             row.get("fromMm"),

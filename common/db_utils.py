@@ -20,6 +20,15 @@ def run_query(query: str, params=None, fetch_one=False, fetch_all=False):
             return cursor.fetchone()
         if fetch_all:
             return cursor.fetchall()
+        # No fetch flags (DML or discard-SELECT): consume any result set so the
+        # connection has no unread results when commit() runs. C-extension
+        # buffered cursors set `with_rows=False` for DML and fetchall() would
+        # raise TypeError on the missing result buffer.
+        try:
+            if cursor.with_rows:
+                cursor.fetchall()
+        except Exception:
+            pass
         return None
 
 
@@ -50,7 +59,7 @@ def _cached_user(user_id: str) -> dict | None:
     """Thread-safe LRU-cached user fetch.  Cache is thread-local per process."""
     with get_db_cursor() as cursor:
         cursor.execute(
-            "SELECT user_id, name, email, department, role, level, status, avatar FROM users WHERE user_id = %s",
+            "SELECT user_id, name, email, department, role, level, status, avatar, phone, employee_id_ext FROM users WHERE user_id = %s",
             (user_id,),
         )
         return cursor.fetchone()

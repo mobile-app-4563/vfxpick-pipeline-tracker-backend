@@ -51,6 +51,7 @@ def shot_to_json(row: dict) -> dict:
         "approvedBy": row.get("approved_by"),
         "comments": row.get("comments"),
         "complexity": row.get("complexity"),
+        "priority": row.get("priority"),
         "fromRoto": row.get("from_roto"),
         "fromPaint": row.get("from_paint"),
         "fromMm": row.get("from_mm"),

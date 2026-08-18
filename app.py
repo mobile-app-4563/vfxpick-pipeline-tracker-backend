@@ -1,18 +1,14 @@
-from flask import Flask, jsonify
+import os
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_compress import Compress
-from flask_caching import Cache
 
+from common.cache_instance import cache
 from config import Config
 
 # Initialize extensions at module level
 compress = Compress()
-cache = Cache(
-    config={
-        "CACHE_TYPE": "SimpleCache",
-        "CACHE_DEFAULT_TIMEOUT": 300,
-    }
-)
 
 
 def create_app() -> Flask:
@@ -22,58 +18,75 @@ def create_app() -> Flask:
     # Prevent OOM from massive uploads (50 MB limit)
     app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
+    # CRITICAL: with debug=True Flask propagates unhandled exceptions past the
+    # after_request hook → error responses ship WITHOUT CORS headers and browsers
+    # report an opaque "Failed to fetch" instead of the real error. Force error
+    # handlers to run so responses always carry CORS headers.
+    app.config["PROPAGATE_EXCEPTIONS"] = False
+
     # Initialize Flask-Compress for gzip/brotli response compression
     compress.init_app(app)
 
     # Initialize Flask-Caching for in-memory caching
     cache.init_app(app)
 
-    # CORS Configuration
+    # CORS Configuration - Allow localhost (any port) + specific external origins
+    DEBUG_MODE = os.getenv("FLASK_DEBUG", "0") == "1" or app.debug
+
+    def is_allowed_origin(origin):
+        """Check if origin is allowed"""
+        if not origin:
+            return False
+        # DEV: allow ANY origin (Flutter web dev server uses random ports,
+        # and may be reached via localhost, 127.0.0.1, or a LAN IP)
+        if DEBUG_MODE:
+            return True
+        # Allow any localhost / 127.0.0.1 origin on any port
+        if origin.startswith(("http://localhost:", "http://127.0.0.1:")) or origin in (
+            "http://localhost",
+            "http://127.0.0.1",
+        ):
+            return True
+        # Allow LAN origins (frontend served from a local IP)
+        if origin.startswith(("http://192.168.", "http://10.", "http://172.")):
+            return True
+        # Allow dev tunnel
+        if origin == "https://jdtf4ztk-3000.inc1.devtunnels.ms":
+            return True
+        return False
+
+    # CORS configuration with dynamic origin checking (flask-cors 4.x takes a
+    # static list; the after_request hook below does the real per-request work)
     CORS(
         app,
-        resources={
-            r"/api/*": {
-                "origins": app.config.get(
-                    "CORS_ORIGINS",
-                    [
-                        "http://localhost:3000",
-                        "http://localhost:5000",
-                        "http://localhost:8080",
-                        "*",
-                    ],
-                )
-            }
-        },
+        origins=[
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://192.168.1.15",
+            "https://jdtf4ztk-3000.inc1.devtunnels.ms",
+            *Config.CORS_ORIGINS,
+        ],
         supports_credentials=True,
-        allow_headers=[
-            "Content-Type",
-            "Authorization",
-            "X-Requested-With",
-        ],
-        methods=[
-            "GET",
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-            "OPTIONS",
-        ],
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         max_age=3600,
     )
 
     @app.after_request
     def after_request(response):
-        origin = app.config.get("CORS_ORIGIN", "*")
-
-        response.headers["Access-Control-Allow-Origin"] = origin
+        # Get origin from request and set if allowed (handles dynamic localhost ports)
+        origin = request.headers.get("Origin")
+        if origin and is_allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        
+        # Always set these headers for preflight requests
         response.headers["Access-Control-Allow-Headers"] = (
             "Content-Type, Authorization, X-Requested-With"
         )
         response.headers["Access-Control-Allow-Methods"] = (
             "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         )
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        # Cache static responses for 5 minutes
         response.headers["Cache-Control"] = "no-cache"
 
         # Close the per-request DB connection (if any)
@@ -98,6 +111,7 @@ def create_app() -> Flask:
     from hrms_proxy.routes import hrms_proxy_bp
     from inventory.routes import inventory_bp
     from feedback.routes import feedback_bp
+    from production.routes import production_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(bidding_bp, url_prefix="/api/bidding")
@@ -115,6 +129,7 @@ def create_app() -> Flask:
     app.register_blueprint(hrms_proxy_bp, url_prefix="/api/hrms-proxy")
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
     app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
+    app.register_blueprint(production_bp, url_prefix="/api/production")
 
     # Health Check Endpoint
     @app.route("/")
@@ -139,13 +154,21 @@ def create_app() -> Flask:
             404,
         )
 
-    @app.errorhandler(500)
-    def internal_error(_error):
+    @app.errorhandler(Exception)
+    def unhandled_exception(error):
+        """Catch-all: log the traceback and return JSON.
+
+        Because PROPAGATE_EXCEPTIONS is False, after_request still runs, so the
+        response includes CORS headers and the browser shows the real error
+        instead of an opaque "Failed to fetch".
+        """
+        app.logger.exception("Unhandled exception: %s", error)
         return (
             jsonify(
                 {
                     "success": False,
                     "error": "Internal server error",
+                    "detail": str(error) if DEBUG_MODE else None,
                 }
             ),
             500,

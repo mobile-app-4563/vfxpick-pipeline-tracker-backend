@@ -91,12 +91,20 @@ def get_db_cursor(commit: bool = False):
         _tls.conn_used = 0
 
     _tls.conn_used = getattr(_tls, 'conn_used', 0) + 1
-    cursor = conn.cursor(dictionary=True)
+    # buffered=True: fetch all rows client-side on execute so commit()/close()
+    # never raise "Unread result found" (C-extension cursors are unbuffered by
+    # default and leave pending results on the connection).
+    cursor = conn.cursor(dictionary=True, buffered=True)
     try:
         yield cursor
         if commit:
             conn.commit()
     finally:
+        # Drain any remaining rows as a belt-and-suspenders guard before close.
+        try:
+            cursor.fetchall()
+        except Exception:
+            pass
         cursor.close()
         if not reuse:
             # Return connection to pool

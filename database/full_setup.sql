@@ -139,6 +139,7 @@ CREATE TABLE shots (
     approved_by        VARCHAR(100) DEFAULT NULL,
     comments           TEXT         DEFAULT NULL,
     complexity         VARCHAR(50)  DEFAULT NULL,
+    priority           VARCHAR(50)  DEFAULT NULL,
     due_date           DATE         DEFAULT NULL,
     client_feedback    TEXT         DEFAULT NULL,
     from_roto          TEXT         DEFAULT NULL,

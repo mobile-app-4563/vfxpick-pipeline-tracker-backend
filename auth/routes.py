@@ -54,8 +54,9 @@ def _distinct_values(table_name, column_name):
         FROM {table_name}
         WHERE {column_name} IS NOT NULL AND TRIM({column_name}) <> ''
         ORDER BY {column_name}
-        """
-    )
+        """,
+        fetch_all=True,
+    ) or []
     return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
 
 
@@ -86,7 +87,9 @@ def options():
     Cached for 5 minutes.  Pass ?refresh=1 to force a cache miss.
     This endpoint does ~14 DB round-trips without cache — caching eliminates that.
     """
-    from app import cache  # lazy import — app must be created first
+    # Cache lives in its own module so it is imported under exactly one name
+    # even when app.py is loaded as both __main__ and app (python app.py).
+    from common.cache_instance import cache
 
     force_refresh = request.args.get("refresh") == "1"
     cache_key = "app_options"
@@ -186,6 +189,9 @@ def login():
         "role": user["role"],
         "status": user["status"],
         "avatar": user["avatar"],
+        "level": user.get("level"),
+        "phone": user.get("phone"),
+        "employeeId": user.get("employee_id_ext"),
     }
     return success({"token": token, "user": user_response})
 
@@ -238,6 +244,9 @@ def register():
                 "role": role,
                 "status": "Active",
                 "avatar": avatar,
+                "level": None,
+                "phone": phone,
+                "employeeId": employee_id,
             },
         },
         201,
@@ -267,6 +276,165 @@ def me(current_user_id):
                 "role": user["role"],
                 "status": user["status"],
                 "avatar": user["avatar"],
+                "level": user.get("level"),
+                "phone": user.get("phone"),
+                "employeeId": user.get("employee_id_ext"),
             }
         }
     )
+
+
+def _serialize_user(user: dict) -> dict:
+    """Full user payload shared by /me and /profile endpoints."""
+    return {
+        "userId": user["user_id"],
+        "name": user["name"],
+        "email": user["email"],
+        "department": user["department"],
+        "role": user["role"],
+        "status": user["status"],
+        "avatar": user["avatar"],
+        "level": user.get("level"),
+        "phone": user.get("phone"),
+        "employeeId": user.get("employee_id_ext"),
+    }
+
+
+def _serialize_teammate(row: dict) -> dict:
+    """Compact user payload for senior list / manager card."""
+    return {
+        "userId": row["user_id"],
+        "name": row["name"],
+        "department": row.get("department"),
+        "role": row.get("role"),
+        "level": row.get("level"),
+        "avatar": row.get("avatar"),
+    }
+
+
+@auth_bp.route("/profile", methods=["GET"])
+@token_required
+def profile(current_user_id):
+    """Return the current user's profile plus department seniors and manager.
+
+    - ``user``: the authenticated user (all editable fields).
+    - ``seniors``: Active users in the same department with level 'Senior'.
+    - ``manager``: Active Supervisor / Team Lead in the same department (or None).
+    """
+    user = get_user(current_user_id)
+    if not user:
+        return failure("User not found", 404)
+
+    department = user.get("department") or ""
+
+    seniors = run_query(
+        """
+        SELECT user_id, name, department, role, level, avatar
+        FROM users
+        WHERE status = 'Active'
+          AND level = 'Senior'
+          AND department = %s
+          AND user_id != %s
+        ORDER BY name
+        """,
+        (department, current_user_id),
+        fetch_all=True,
+    ) or []
+
+    manager = run_query(
+        """
+        SELECT user_id, name, department, role, level, avatar
+        FROM users
+        WHERE status = 'Active'
+          AND department = %s
+          AND role IN ('Supervisor', 'Team Lead')
+          AND user_id != %s
+        ORDER BY FIELD(role, 'Supervisor', 'Team Lead'), name
+        LIMIT 1
+        """,
+        (department, current_user_id),
+        fetch_one=True,
+    )
+
+    return success(
+        {
+            "user": _serialize_user(user),
+            "seniors": [_serialize_teammate(s) for s in seniors],
+            "manager": _serialize_teammate(manager) if manager else None,
+        }
+    )
+
+
+@auth_bp.route("/profile", methods=["PUT"])
+@token_required
+def update_profile(current_user_id):
+    """Update the current user's own profile.
+
+    Editable: name, email, phone, employeeId, avatar, level, and optional
+    password change.  Role and department are NEVER editable by the user —
+    any submitted values for them are ignored.
+    """
+    from common.db_utils import invalidate_user_cache
+
+    user = get_user(current_user_id)
+    if not user:
+        return failure("User not found", 404)
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    phone = (data.get("phone") or "").strip() or None
+    employee_id = (data.get("employeeId") or "").strip() or None
+    avatar = (data.get("avatar") or "").strip()
+    level = (data.get("level") or "").strip() or None
+    current_password = data.get("currentPassword") or ""
+    new_password = data.get("newPassword") or ""
+
+    if not name or not email:
+        return failure("Name and email are required.", 400)
+
+    if level and level not in ARTIST_LEVELS:
+        return failure(f"Invalid level. Choose from: {', '.join(ARTIST_LEVELS)}.", 400)
+
+    if len(email) > 150:
+        return failure("Email is too long.", 400)
+
+    # Email uniqueness (excluding self)
+    existing = run_query(
+        "SELECT user_id FROM users WHERE LOWER(email) = %s AND user_id != %s",
+        (email, current_user_id),
+        fetch_one=True,
+    )
+    if existing:
+        return failure("Email is already registered to another user.", 409)
+
+    password_hash = user["password_hash"]
+    if new_password:
+        if not current_password:
+            return failure("Current password is required to set a new password.", 400)
+        if not bcrypt.checkpw(
+            current_password.encode("utf-8"),
+            password_hash.encode("utf-8"),
+        ):
+            return failure("Current password is incorrect.", 400)
+        password_hash = bcrypt.hashpw(
+            new_password.encode("utf-8"),
+            bcrypt.gensalt(),
+        ).decode("utf-8")
+
+    if not avatar:
+        avatar = initials(name)
+
+    run_query(
+        """
+        UPDATE users
+        SET name = %s, email = %s, phone = %s, employee_id_ext = %s,
+            avatar = %s, level = %s, password_hash = %s
+        WHERE user_id = %s
+        """,
+        (name, email, phone, employee_id, avatar, level, password_hash, current_user_id),
+    )
+    invalidate_user_cache(current_user_id)
+
+    updated = get_user(current_user_id)
+    return success({"user": _serialize_user(updated)})

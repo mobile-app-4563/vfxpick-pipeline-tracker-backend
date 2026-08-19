@@ -42,6 +42,29 @@ def _parse_date_range(start_date_raw, end_date_raw):
     return start_date, end_date
 
 
+# Progress bucket used by the mandays bar chart on the report screen.
+_COMPLETED_STATUSES = {"Completed", "Approved", "Approved Internal"}
+_IN_PROGRESS_STATUSES = {"WIP", "Bidding", "Bids Received", "Delivered"}
+_IN_PROGRESS_ARTIST = {
+    "In Progress",
+    "Awaiting QC",
+    "WIP Completed",
+    "Render & Upload Completed",
+}
+
+
+def _progress_of(row):
+    """Bucket a shot into Completed / In Progress / Remaining for the chart."""
+    status = (row.get("status") or "").strip()
+    supervisor = (row.get("supervisor_status") or "").strip()
+    artist = (row.get("artist_status") or "").strip()
+    if status in _COMPLETED_STATUSES or supervisor == "Approved":
+        return "Completed"
+    if status in _IN_PROGRESS_STATUSES or artist in _IN_PROGRESS_ARTIST:
+        return "In Progress"
+    return "Remaining"
+
+
 def _report_rows(
     department,
     specific_date=None,
@@ -81,7 +104,8 @@ def _report_rows(
     rows = run_query(
         f"""
         SELECT sh.client_id, sh.show_name, s.shot_code, s.allocated_date,
-               s.mandays, s.client_feedback
+               s.mandays, s.client_feedback, s.status,
+               s.supervisor_status, s.artist_status
         FROM shots s
         JOIN shows sh ON s.show_id = sh.show_id
         WHERE {' AND '.join(clauses)}
@@ -121,6 +145,7 @@ def report(_current_user_id):
             "date": to_iso(r["allocated_date"]),
             "mandays": float(r["mandays"]) if r["mandays"] is not None else 0.0,
             "clientFeedback": r["client_feedback"],
+            "progress": _progress_of(r),
         }
         for r in rows
     ]

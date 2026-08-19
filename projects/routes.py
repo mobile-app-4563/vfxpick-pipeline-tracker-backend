@@ -500,6 +500,7 @@ def update_shot(current_user_id, shot_id):
         "startingDate": "starting_date",
         "completeDate": "complete_date",
         "dailyWip": "daily_wip",
+        "mandays": "mandays",
         "consumedMandays": "consumed_mandays",
         "savedMandays": "saved_mandays",
         "approvedVersion": "approved_version",

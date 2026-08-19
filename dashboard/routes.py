@@ -4,7 +4,7 @@ Department-wise shot tracking tables (ROTO, PAINT, MM, COMP) plus the
 "Today's Target" summary panel, and an expandable shot list per show.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from flask import Blueprint, request
 
@@ -16,6 +16,64 @@ from common.http import success, failure
 from common.serializers import SHOT_SELECT, shot_to_json
 
 dashboard_bp = Blueprint("dashboard", __name__)
+
+
+@dashboard_bp.route("/home-summary", methods=["GET"])
+@token_required
+def home_summary(_current_user_id):
+    """Today/tomorrow pickout counts and active shows for the Home page.
+
+    Computed from the production management grid (the Jan-Dec working file):
+    a "pickout" is a grid row whose ETA falls today/tomorrow, and active shows
+    are the distinct client/show groups with the earliest ETA. Cached for
+    2 minutes. Pass ?refresh=1 to bypass.
+    """
+    if request.args.get("refresh") != "1":
+        cached = cache.get("dash_home_summary")
+        if cached is not None:
+            return cached
+
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    counts = run_query(
+        """
+        SELECT
+            SUM(CASE WHEN eta = %s THEN 1 ELSE 0 END) AS today_pickouts,
+            SUM(CASE WHEN eta = %s THEN 1 ELSE 0 END) AS tomorrow_pickouts
+        FROM production_grid
+        """,
+        (today, tomorrow),
+        fetch_one=True,
+    ) or {}
+
+    shows = run_query(
+        """
+        SELECT client_name, show_name, MIN(eta) AS eta
+        FROM production_grid
+        WHERE eta IS NOT NULL AND TRIM(eta) <> ''
+        GROUP BY client_name, show_name
+        ORDER BY eta ASC
+        LIMIT 50
+        """,
+        fetch_all=True,
+    ) or []
+
+    result = {
+        "todayPickouts": int(counts.get("today_pickouts") or 0),
+        "tomorrowPickouts": int(counts.get("tomorrow_pickouts") or 0),
+        "activeShows": [
+            {
+                "client": r["client_name"],
+                "show": r["show_name"],
+                "eta": to_iso(r["eta"]),
+            }
+            for r in shows
+        ],
+    }
+    response = success(result)
+    cache.set("dash_home_summary", response, timeout=120)
+    return response
 
 
 @dashboard_bp.route("/invent-active-shows", methods=["GET"])

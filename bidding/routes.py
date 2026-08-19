@@ -70,6 +70,72 @@ def list_pending_bids(current_user_id):
     return success({"pendingBids": [shot_to_json(r) for r in rows]})
 
 
+@bidding_bp.route("/grid-pending", methods=["GET"])
+@token_required
+def list_grid_pending_bids(current_user_id):
+    """List production-grid shots whose status is 'Bidding'.
+
+    These come from the Production Management grid (JAN-DEC status column)
+    so they live in the production_grid table, not the `shots` table.
+    """
+    from common.db_utils import to_iso
+
+    rows = run_query(
+        """
+        SELECT grid_id, coordinator, month, shots_received_date, client_for_ref,
+               client_name, show_name, wip_eta, eta, shot_code, frames, tasks,
+               review_notes, status, delivered_on, work_station, shot_mandays,
+               approved_client_md, fl_eta, fl_mandays
+        FROM production_grid
+        WHERE LOWER(TRIM(status)) = 'bidding'
+        ORDER BY created_at ASC
+        """,
+        fetch_all=True,
+    ) or []
+
+    grid = []
+    for idx, row in enumerate(rows):
+        grid.append(
+            {
+                "sNo": idx + 1,
+                "shotId": row.get("grid_id"),
+                "coordinator": row.get("coordinator"),
+                "month": row.get("month"),
+                "shotsReceivedDate": to_iso(row.get("shots_received_date")),
+                "clientForRef": row.get("client_for_ref"),
+                "client": row.get("client_name"),
+                "show": row.get("show_name"),
+                "wipEta": to_iso(row.get("wip_eta")),
+                "eta": to_iso(row.get("eta")),
+                "shotCode": row.get("shot_code"),
+                "frames": row.get("frames"),
+                "tasks": row.get("tasks"),
+                "reviewNotes": row.get("review_notes"),
+                "status": row.get("status"),
+                "deliveredOn": to_iso(row.get("delivered_on")),
+                "workStation": row.get("work_station"),
+                "shotMandays": (
+                    float(row["shot_mandays"])
+                    if row.get("shot_mandays") is not None
+                    else 0.0
+                ),
+                "approvedClientMd": (
+                    float(row["approved_client_md"])
+                    if row.get("approved_client_md") is not None
+                    else 0.0
+                ),
+                "flEta": to_iso(row.get("fl_eta")),
+                "flMandays": (
+                    float(row["fl_mandays"])
+                    if row.get("fl_mandays") is not None
+                    else 0.0
+                ),
+            }
+        )
+
+    return success({"gridBids": grid, "total": len(grid)})
+
+
 @bidding_bp.route("/shot/<shot_id>", methods=["GET"])
 @token_required
 def get_shot_bids(current_user_id, shot_id):

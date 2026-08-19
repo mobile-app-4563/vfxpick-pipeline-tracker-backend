@@ -482,6 +482,71 @@ def bulk_upsert_production_grid(current_user_id):
     )
 
 
+@production_bp.route("/grid/<grid_id>", methods=["DELETE"])
+@token_required
+def delete_production_grid_row(current_user_id, grid_id):
+    """Delete a single production-grid row by its grid_id (Admin only)."""
+    user = get_user(current_user_id)
+    if not user or user["role"] != "Admin":
+        return failure("Access denied: Admin role required", 403)
+
+    try:
+        run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        return success(
+            {"message": "Grid row deleted successfully", "gridId": grid_id}
+        )
+    except Exception as e:
+        return failure(f"Failed to delete grid row: {e}", 500)
+
+
+@production_bp.route("/grid/bulk-delete", methods=["POST"])
+@token_required
+def bulk_delete_production_grid(current_user_id):
+    """Delete multiple production-grid rows in a single request.
+
+    Body: {"gridIds": ["GRID1", "GRID2", ...]}
+    Runs in one transaction; returns deleted/skipped counts. Skipped
+    rows are grid_ids that do not exist in the table.
+    """
+    user = get_user(current_user_id)
+    if not user or user["role"] != "Admin":
+        return failure("Access denied: Admin role required", 403)
+
+    data = request.get_json(silent=True) or {}
+    grid_ids = data.get("gridIds") or []
+    if not isinstance(grid_ids, list) or not grid_ids:
+        return failure("gridIds (list) is required.", 400)
+
+    conn = get_db()
+    deleted = 0
+    skipped = 0
+    try:
+        conn.autocommit = False
+        cursor = conn.cursor(buffered=True)
+        for grid_id in grid_ids:
+            cursor.execute(
+                "DELETE FROM production_grid WHERE grid_id = %s", (grid_id,)
+            )
+            if cursor.rowcount:
+                deleted += 1
+            else:
+                skipped += 1
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return failure(f"Failed to bulk delete grid rows: {e}", 500)
+    finally:
+        conn.close()
+
+    return success(
+        {
+            "message": f"Deleted {deleted} row(s), skipped {skipped}.",
+            "deleted": deleted,
+            "skipped": skipped,
+        }
+    )
+
+
 def _accessible_roles(user):
     """Return True if user can access production module."""
     if not user:

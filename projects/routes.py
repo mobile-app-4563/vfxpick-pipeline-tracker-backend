@@ -71,10 +71,13 @@ def _slugify_artist_name(text):
 
 
 def _next_user_id(cursor):
-    """Return the next free USR-prefixed user id (count-based, collision-safe)."""
-    cursor.execute("SELECT COUNT(*) AS cnt FROM users")
-    cnt = cursor.fetchone()["cnt"] or 0
-    candidate = 100 + cnt + 1
+    """Return the next free USR-prefixed user id (MAX-based, collision-safe)."""
+    cursor.execute(
+        "SELECT MAX(CAST(SUBSTRING(user_id, 4) AS UNSIGNED)) AS max_num "
+        "FROM users WHERE user_id LIKE 'USR%'"
+    )
+    max_num = cursor.fetchone()["max_num"] or 0
+    candidate = max(max_num, 100) + 1
     while True:
         uid = f"USR{candidate}"
         cursor.execute("SELECT user_id FROM users WHERE user_id = %s", (uid,))

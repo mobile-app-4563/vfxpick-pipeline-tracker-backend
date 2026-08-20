@@ -47,9 +47,28 @@ def run_query_many(queries: list) -> list:
 
 
 def generate_prefixed_id(table_name: str, id_column: str, prefix: str, start_number: int):
-    """Generate a prefixed ID by counting rows. Uses cached connection."""
-    row = run_query(f"SELECT COUNT(*) AS cnt FROM {table_name}", fetch_one=True)
-    return f"{prefix}{start_number + row['cnt'] + 1}"
+    """Generate a collision-safe prefixed ID.
+
+    Count-based generation breaks when rows are deleted (COUNT drops but the
+    highest ID stays), which hands out an already-used ID and trips the
+    PRIMARY KEY.  We therefore start from the highest existing numeric suffix
+    for the prefix (MAX-based) and walk upward until we find a free ID.
+    """
+    row = run_query(
+        f"SELECT MAX(CAST(SUBSTRING({id_column}, %s) AS UNSIGNED)) AS max_num "
+        f"FROM {table_name} WHERE {id_column} LIKE %s",
+        (len(prefix) + 1, f"{prefix}%"),
+        fetch_one=True,
+    )
+    candidate = max(row["max_num"] or 0, start_number) + 1
+    while True:
+        uid = f"{prefix}{candidate}"
+        exists = run_query(
+            f"SELECT 1 FROM {table_name} WHERE {id_column} = %s", (uid,), fetch_one=True
+        )
+        if not exists:
+            return uid
+        candidate += 1
 
 
 # ── Cached lookup helpers ──────────────────────────────────────────────

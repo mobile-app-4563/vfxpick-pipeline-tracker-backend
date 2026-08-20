@@ -14,6 +14,7 @@ from common.constants import (
     BROAD_ACCESS_ROLES,
     DEPARTMENTS,
     USER_DEPARTMENTS,
+    USER_ROLES,
 )
 from common.db_utils import generate_prefixed_id, get_user, initials, run_query
 from common.http import failure, success
@@ -193,3 +194,46 @@ def remove_member(current_user_id, user_id):
     run_query("DELETE FROM users WHERE user_id = %s", (user_id,))
 
     return success({"message": "Team member removed", "userId": user_id})
+
+
+@teams_bp.route("/<user_id>", methods=["PUT"])
+@token_required
+def update_member(current_user_id, user_id):
+    """Update a team member. Restricted to broad-access roles."""
+    actor = get_user(current_user_id)
+    if not actor or actor["role"] not in BROAD_ACCESS_ROLES:
+        return failure("You are not allowed to update team members.", 403)
+
+    member = get_user(user_id)
+    if not member:
+        return failure("Team member not found", 404)
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    department = (data.get("department") or "").strip()
+    role = (data.get("role") or "").strip()
+    level = (data.get("level") or "").strip() or None
+
+    if not name or not department or not role:
+        return failure("name, department and role are required.", 400)
+    if department not in USER_DEPARTMENTS:
+        return failure("Invalid department.", 400)
+    if role not in USER_ROLES:
+        return failure("Invalid role.", 400)
+    if level and level not in ARTIST_LEVELS:
+        return failure("Invalid level.", 400)
+    if role != "Artist":
+        level = None
+
+    avatar = initials(name)
+    run_query(
+        """
+        UPDATE users
+        SET name = %s, department = %s, role = %s, level = %s, avatar = %s
+        WHERE user_id = %s
+        """,
+        (name, department, role, level, avatar, user_id),
+    )
+
+    updated = get_user(user_id)
+    return success({"member": _serialize(updated)})

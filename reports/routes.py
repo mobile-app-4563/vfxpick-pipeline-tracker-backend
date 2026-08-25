@@ -74,8 +74,15 @@ def _report_rows(
     year=None,
 ):
     today = date.today()
-    clauses = ["s.department = %s"]
-    params = [department]
+    # Department may be a comma-separated list (multi-department shots).
+    dept_parts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    if len(dept_parts) == 1:
+        clauses = ["s.department = %s"]
+        params = [dept_parts[0]]
+    else:
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(dept_parts))
+        clauses = [f"({dept_clause})"]
+        params = dept_parts[:]
 
     if start_date and end_date:
         clauses.append("DATE(s.allocated_date) BETWEEN %s AND %s")

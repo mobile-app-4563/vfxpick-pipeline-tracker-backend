@@ -86,15 +86,17 @@ def send_message(current_user_id):
     recipients = set()
     if shot["artist_id"]:
         recipients.add(shot["artist_id"])
-    supervisors = run_query(
-        """
-        SELECT user_id FROM users
-        WHERE department = %s AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
-        """,
-        (shot["department"],),
-        fetch_all=True,
-    ) or []
-    recipients.update(s["user_id"] for s in supervisors)
+    dept_parts = [d.strip() for d in (shot.get("department") or "").split(",") if d.strip()]
+    if dept_parts:
+        supervisors = run_query(
+            f"""
+            SELECT user_id FROM users
+            WHERE department IN ({', '.join(['%s'] * len(dept_parts))}) AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
+            """,
+            tuple(dept_parts),
+            fetch_all=True,
+        ) or []
+        recipients.update(s["user_id"] for s in supervisors)
     recipients.discard(current_user_id)
 
     notif_type = "Attachment Shared" if attachment_url else "New Message"

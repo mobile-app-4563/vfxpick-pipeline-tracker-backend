@@ -46,6 +46,16 @@ def _month_year():
     return month, year
 
 
+def _department_match(department):
+    """Return (sql_clause, params) matching shots whose department list
+    contains any of the requested (possibly comma-separated) departments."""
+    parts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    if not parts:
+        return "1 = 0", []
+    clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(parts))
+    return f"({clause})", parts
+
+
 def _parse_date_range(start_date_raw=None, end_date_raw=None):
     """Parse start/end date values and return (start_date, end_date) or (None, None)."""
     start_date = start_date_raw if start_date_raw is not None else request.args.get("startDate")
@@ -136,7 +146,9 @@ def department_review(_current_user_id):
     department = request.args.get("department")
     if not department:
         return failure("department is required.", 400)
-    
+
+    dept_clause, dept_params = _department_match(department)
+
     # Check for date range params
     start_date, end_date = _parse_date_range()
     
@@ -148,11 +160,11 @@ def department_review(_current_user_id):
                    COUNT(*)                  AS total_shots,
                    COALESCE(SUM(s.mandays), 0) AS total_mandays
             FROM shots s
-            WHERE s.department = %s
+            WHERE %s
               AND s.allocated_date IS NOT NULL
               AND DATE(s.allocated_date) BETWEEN %s AND %s
             """,
-            (department, start_date, end_date),
+            (*dept_params, start_date, end_date),
             fetch_one=True,
         )
         shot_rows = run_query(
@@ -167,12 +179,12 @@ def department_review(_current_user_id):
             FROM shots s
             JOIN shows sh ON sh.show_id = s.show_id
             LEFT JOIN users u ON u.user_id = s.artist_id
-            WHERE s.department = %s
+            WHERE %s
               AND s.allocated_date IS NOT NULL
               AND DATE(s.allocated_date) BETWEEN %s AND %s
             ORDER BY s.allocated_date DESC, sh.client_id, s.shot_code
             """,
-            (department, start_date, end_date),
+            (*dept_params, start_date, end_date),
             fetch_all=True,
         ) or []
         return success(
@@ -206,12 +218,12 @@ def department_review(_current_user_id):
                    COUNT(*)                  AS total_shots,
                    COALESCE(SUM(s.mandays), 0) AS total_mandays
             FROM shots s
-            WHERE s.department = %s
+            WHERE %s
               AND s.allocated_date IS NOT NULL
               AND MONTH(s.allocated_date) = %s
               AND YEAR(s.allocated_date) = %s
             """,
-            (department, month, year),
+            (*dept_params, month, year),
             fetch_one=True,
         )
         shot_rows = run_query(
@@ -226,13 +238,13 @@ def department_review(_current_user_id):
             FROM shots s
             JOIN shows sh ON sh.show_id = s.show_id
             LEFT JOIN users u ON u.user_id = s.artist_id
-            WHERE s.department = %s
+            WHERE %s
               AND s.allocated_date IS NOT NULL
               AND MONTH(s.allocated_date) = %s
               AND YEAR(s.allocated_date) = %s
             ORDER BY s.allocated_date DESC, sh.client_id, s.shot_code
             """,
-            (department, month, year),
+            (*dept_params, month, year),
             fetch_all=True,
         ) or []
         return success(
@@ -401,6 +413,8 @@ def export_department_review(_current_user_id):
     )
     month, year = _month_year()
 
+    dept_clause, dept_params = _department_match(department)
+
     if start_date and end_date:
         row = run_query(
             """
@@ -408,11 +422,11 @@ def export_department_review(_current_user_id):
                          COUNT(*)                  AS total_shots,
                          COALESCE(SUM(s.mandays), 0) AS total_mandays
             FROM shots s
-            WHERE s.department = %s
+            WHERE %s
                 AND s.allocated_date IS NOT NULL
                 AND DATE(s.allocated_date) BETWEEN %s AND %s
             """,
-            (department, start_date, end_date),
+            (*dept_params, start_date, end_date),
             fetch_one=True,
         )
 
@@ -430,12 +444,12 @@ def export_department_review(_current_user_id):
             FROM shots s
             JOIN shows sh ON sh.show_id = s.show_id
             LEFT JOIN users u ON u.user_id = s.artist_id
-            WHERE s.department = %s
+            WHERE %s
                 AND s.allocated_date IS NOT NULL
                 AND DATE(s.allocated_date) BETWEEN %s AND %s
             ORDER BY s.allocated_date DESC, sh.client_id, s.shot_code
             """,
-            (department, start_date, end_date),
+            (*dept_params, start_date, end_date),
             fetch_all=True,
         ) or []
         period_label = f"{start_date} to {end_date}"
@@ -446,12 +460,12 @@ def export_department_review(_current_user_id):
                          COUNT(*)                  AS total_shots,
                          COALESCE(SUM(s.mandays), 0) AS total_mandays
             FROM shots s
-            WHERE s.department = %s
+            WHERE %s
                 AND s.allocated_date IS NOT NULL
                 AND MONTH(s.allocated_date) = %s
                 AND YEAR(s.allocated_date) = %s
             """,
-            (department, month, year),
+            (*dept_params, month, year),
             fetch_one=True,
         )
 
@@ -469,13 +483,13 @@ def export_department_review(_current_user_id):
             FROM shots s
             JOIN shows sh ON sh.show_id = s.show_id
             LEFT JOIN users u ON u.user_id = s.artist_id
-            WHERE s.department = %s
+            WHERE %s
                 AND s.allocated_date IS NOT NULL
                 AND MONTH(s.allocated_date) = %s
                 AND YEAR(s.allocated_date) = %s
             ORDER BY s.allocated_date DESC, sh.client_id, s.shot_code
             """,
-            (department, month, year),
+            (*dept_params, month, year),
             fetch_all=True,
         ) or []
         period_label = f"{_month_name(month)} {year}"

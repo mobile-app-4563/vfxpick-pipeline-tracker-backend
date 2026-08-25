@@ -15,10 +15,15 @@ bidding_bp = Blueprint("bidding", __name__)
 
 
 def _can_access(user, department):
-    """Check if user can access a department."""
+    """Check if user can access a department (may be a comma-separated list)."""
     from common.constants import BROAD_ACCESS_ROLES
 
-    return user and (user["role"] in BROAD_ACCESS_ROLES or user["department"] == department)
+    if not user:
+        return False
+    if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    depts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    return user["department"] in depts
 
 
 def _to_float(value, default=0.0):
@@ -49,14 +54,16 @@ def list_pending_bids(current_user_id):
     if department:
         if not _can_access(user, department):
             return failure("You are not allowed to access this department.", 403)
-        query += " AND s.department = %s"
-        params.append(department)
+        dept_parts = [d.strip() for d in department.split(",") if d.strip()]
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(dept_parts))
+        query += f" AND ({dept_clause})"
+        params.extend(dept_parts)
     else:
         # If no department specified, restrict to accessible departments
         from common.constants import BROAD_ACCESS_ROLES, DEPARTMENTS
 
         if user["role"] not in BROAD_ACCESS_ROLES:
-            query += " AND s.department = %s"
+            query += " AND FIND_IN_SET(%s, s.department)"
             params.append(user["department"])
 
     # Status filter

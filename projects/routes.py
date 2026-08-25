@@ -17,12 +17,12 @@ from auth.middleware import token_required
 from common.constants import (
     ARTIST_STATUSES,
     BROAD_ACCESS_ROLES,
-    DEPARTMENTS,
     SHOT_STATUSES,
     SUPERVISOR_STATUSES,
 )
-from common.db_utils import generate_prefixed_id, get_user, run_query
+from common.db_utils import generate_prefixed_id, get_user, run_query, to_sql_date
 from common.http import failure, success
+from common.options_store import effective_pipeline_departments
 from common.serializers import SHOT_SELECT, shot_to_json
 from database.connection import get_db
 
@@ -34,12 +34,30 @@ def _accessible_departments(user):
     if not user:
         return []
     if user["role"] in BROAD_ACCESS_ROLES:
-        return DEPARTMENTS
-    return [user["department"]] if user["department"] in DEPARTMENTS else []
+        return effective_pipeline_departments()
+    # Runtime-added departments are tracked in the options store; a
+    # non-broad user sees their own department even if it was added at
+    # runtime (so it must also pass the const check for backwards
+    # compatibility, but new depts are still valid via the options store).
+    if user["department"] in effective_pipeline_departments():
+        return [user["department"]]
+    return []
+
+
+def _split_departments(department):
+    """Normalize a (possibly comma-separated) department string to a list."""
+    if not department:
+        return []
+    return [d.strip() for d in str(department).split(",") if d.strip()]
 
 
 def _can_access(user, department):
-    return user and (user["role"] in BROAD_ACCESS_ROLES or user["department"] == department)
+    if not user:
+        return False
+    if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    # department may be a comma-separated list (multi-department shot).
+    return user["department"] in _split_departments(department)
 
 
 def _to_int(value, default=0):
@@ -339,13 +357,18 @@ def list_shots(current_user_id):
     params = []
 
     if department:
-        if department not in allowed:
+        requested = _split_departments(department)
+        if not requested or any(d not in allowed for d in requested):
             return failure("You are not allowed to access this department.", 403)
-        clauses.append("s.department = %s")
-        params.append(department)
+        # Shots can carry multiple comma-separated departments; match any.
+        clauses.append(
+            "(" + " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(requested)) + ")"
+        )
+        params.extend(requested)
     else:
-        placeholders = ", ".join(["%s"] * len(allowed))
-        clauses.append(f"s.department IN ({placeholders})")
+        clauses.append(
+            "(" + " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(allowed)) + ")"
+        )
         params.extend(allowed)
 
     if client_id:
@@ -406,8 +429,11 @@ def create_shot(current_user_id):
 
     if not all([show_id, department, shot_code]):
         return failure("showId, department and shotCode are required.", 400)
-    if department not in DEPARTMENTS:
+    dept_parts = _split_departments(department)
+    valid_depts = effective_pipeline_departments()
+    if not dept_parts or any(d not in valid_depts for d in dept_parts):
         return failure("Invalid department.", 400)
+    department = ",".join(dept_parts)
     if not _can_access(user, department):
         return failure("You are not allowed to create shots in this department.", 403)
 
@@ -443,18 +469,18 @@ def create_shot(current_user_id):
             data.get("totalFrames") or 0,
             data.get("supervisorBid") or 0,
             data.get("clientBid") or 0,
-            data.get("clientEta"),
+            to_sql_date(data.get("clientEta")),
             data.get("notes"),
             status,
             data.get("description"),
-            data.get("dueDate"),
+            to_sql_date(data.get("dueDate")),
             data.get("clientFeedback"),
             data.get("coordinator"),
             data.get("levelOfShot"),
-            data.get("allocationDate"),
-            data.get("allocationEta"),
-            data.get("startingDate"),
-            data.get("completeDate"),
+            to_sql_date(data.get("allocationDate")),
+            to_sql_date(data.get("allocationEta")),
+            to_sql_date(data.get("startingDate")),
+            to_sql_date(data.get("completeDate")),
             data.get("dailyWip") or 0,
             data.get("consumedMandays") or 0,
             data.get("savedMandays") or 0,
@@ -518,12 +544,24 @@ def update_shot(current_user_id, shot_id):
     }
     sets = []
     params = []
+    date_fields = {
+        "clientEta",
+        "dueDate",
+        "allocationDate",
+        "allocationEta",
+        "startingDate",
+        "completeDate",
+        "artistEta",
+        "allocatedDate",
+    }
     for json_key, column in field_map.items():
         if json_key in data:
             if json_key == "status" and data[json_key] not in SHOT_STATUSES:
                 return failure("Invalid status.", 400)
             sets.append(f"{column} = %s")
-            params.append(data[json_key])
+            params.append(
+                to_sql_date(data[json_key]) if json_key in date_fields else data[json_key]
+            )
 
     if not sets:
         return failure("No fields to update.", 400)
@@ -646,9 +684,13 @@ def bulk_upsert_shots(current_user_id):
         if not show_id or not department or not shot_code:
             errors.append(f"Row {idx}: showId, department and shotCode are required.")
             continue
-        if department not in DEPARTMENTS:
+        dept_parts = _split_departments(department)
+        valid_depts = effective_pipeline_departments()
+        if not dept_parts or any(d not in valid_depts for d in dept_parts):
             errors.append(f"Row {idx}: invalid department '{department}'.")
             continue
+        # Normalize the stored value (trimmed, comma-joined, no spaces).
+        department = ",".join(dept_parts)
         if not _can_access(user, department):
             errors.append(f"Row {idx}: you are not allowed to modify department '{department}'.")
             continue
@@ -693,20 +735,20 @@ def bulk_upsert_shots(current_user_id):
                 else:
                     show_cache.add(show_id)
 
-        # ── Batch-fetch existing shots for this show+department ──────────
-        # Group by (show_id, department) so we only do one SELECT per group
-        existing_map = {}  # (show_id, department, shot_code) -> shot_id
-        unique_keys = {(show_id, department) for _, show_id, department, *_ in valid_rows}
-        for show_id, dept in unique_keys:
-            if show_id not in show_cache:
-                continue
+        # ── Batch-fetch existing shots for these shows ──────────────────
+        # Match by show_id only, then compare departments client-side so
+        # comma-separated multi-department lists match regardless of order.
+        existing_map = {}  # (show_id, frozenset(depts), shot_code) -> shot_id
+        shows_to_fetch = {show_id for _, show_id, *_ in valid_rows if show_id in show_cache}
+        for show_id in shows_to_fetch:
             cursor.execute(
                 "SELECT shot_id, show_id, department, shot_code FROM shots "
-                "WHERE show_id = %s AND department = %s",
-                (show_id, dept),
+                "WHERE show_id = %s",
+                (show_id,),
             )
             for r in cursor.fetchall():
-                existing_map[(r["show_id"], r["department"], r["shot_code"])] = r["shot_id"]
+                dept_set = frozenset(_split_departments(r["department"]))
+                existing_map[(r["show_id"], dept_set, r["shot_code"])] = r["shot_id"]
 
         # ── Update / Insert each row ────────────────────────────────────
         update_sql = """
@@ -748,11 +790,14 @@ def bulk_upsert_shots(current_user_id):
                 errors.append(f"Row {idx}: show '{show_id}' not found.")
                 continue
 
+            # Multi-department shots: use the first department for artist
+            # resolution / placeholder creation (users have a single dept).
+            primary_department = _split_departments(department)[0]
             artist_id, artist_note = _resolve_artist_id(
                 cursor,
                 row.get("artistId"),
                 row.get("artistName"),
-                department,
+                primary_department,
                 artist_cache,
             )
             artist_name_raw = (row.get("artistName") or "").strip()
@@ -764,7 +809,7 @@ def bulk_upsert_shots(current_user_id):
             elif artist_note:
                 notes.append(f"Row {idx}: {artist_note}")
 
-            existing_key = (show_id, department, shot_code)
+            existing_key = (show_id, frozenset(_split_departments(department)), shot_code)
             params = upsert_params(
                 row,
                 show_id,
@@ -832,25 +877,25 @@ def _build_upsert_params():
             _to_int(row.get("totalFrames")),
             _to_float(row.get("supervisorBid")),
             _to_float(row.get("clientBid")),
-            row.get("clientEta"),
+            to_sql_date(row.get("clientEta")),
             row.get("notes"),
             status,
             row.get("description"),
-            row.get("dueDate"),
+            to_sql_date(row.get("dueDate")),
             supervisor_status,
             artist_status,
             _to_float(row.get("artistBid")),
-            row.get("artistEta"),
+            to_sql_date(row.get("artistEta")),
             _to_float(row.get("mandays")),
-            row.get("allocatedDate"),
+            to_sql_date(row.get("allocatedDate")),
             row.get("clientFeedback"),
             artist_id,
             row.get("coordinator"),
             row.get("levelOfShot"),
-            row.get("allocationDate"),
-            row.get("allocationEta"),
-            row.get("startingDate"),
-            row.get("completeDate"),
+            to_sql_date(row.get("allocationDate")),
+            to_sql_date(row.get("allocationEta")),
+            to_sql_date(row.get("startingDate")),
+            to_sql_date(row.get("completeDate")),
             _to_float(row.get("dailyWip")),
             _to_float(row.get("consumedMandays")),
             _to_float(row.get("savedMandays")),

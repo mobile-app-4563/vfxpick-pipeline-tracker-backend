@@ -72,22 +72,24 @@ def add_asset(current_user_id):
         )
         uploader = get_user(current_user_id)
         if shot:
-            supervisors = run_query(
-                """
-                SELECT user_id FROM users
-                WHERE department = %s AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
-                """,
-                (shot["department"],),
-                fetch_all=True,
-            ) or []
-            sender = uploader["name"] if uploader else "Someone"
-            for sup in supervisors:
-                if sup["user_id"] != current_user_id:
-                    create_notification(
-                        f"{sender} shared a document on shot {shot['shot_code']}.",
-                        "Attachment Shared",
-                        sup["user_id"],
-                    )
+            dept_parts = [d.strip() for d in (shot["department"] or "").split(",") if d.strip()]
+            if dept_parts:
+                supervisors = run_query(
+                    f"""
+                    SELECT user_id FROM users
+                    WHERE department IN ({', '.join(['%s'] * len(dept_parts))}) AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
+                    """,
+                    tuple(dept_parts),
+                    fetch_all=True,
+                ) or []
+                sender = uploader["name"] if uploader else "Someone"
+                for sup in supervisors:
+                    if sup["user_id"] != current_user_id:
+                        create_notification(
+                            f"{sender} shared a document on shot {shot['shot_code']}.",
+                            "Attachment Shared",
+                            sup["user_id"],
+                        )
 
     row = run_query(
         """

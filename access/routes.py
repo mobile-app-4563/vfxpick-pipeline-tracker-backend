@@ -184,6 +184,54 @@ def _ensure_table():
         pass
 
 
+_DELETE_ENABLED_KEY = "delete_options_enabled"
+
+
+def _ensure_settings_table():
+    run_query(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key VARCHAR(64) PRIMARY KEY,
+            setting_value VARCHAR(255) NOT NULL,
+            updated_by_user_id VARCHAR(20),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+
+def _get_delete_enabled():
+    """Global kill-switch: when False, delete buttons/actions are hidden
+    for every user across all modules."""
+    try:
+        _ensure_settings_table()
+        rows = run_query(
+            "SELECT setting_value FROM app_settings WHERE setting_key = %s",
+            (_DELETE_ENABLED_KEY,),
+            fetch_all=True,
+        )
+        if rows and rows[0].get("setting_value") == "0":
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _set_delete_enabled(user_id, enabled):
+    _ensure_settings_table()
+    run_query(
+        """
+        INSERT INTO app_settings (setting_key, setting_value, updated_by_user_id)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            setting_value = VALUES(setting_value),
+            updated_by_user_id = VALUES(updated_by_user_id)
+        """,
+        (_DELETE_ENABLED_KEY, "1" if enabled else "0", user_id),
+    )
+
+
 def _is_admin(user):
     role = (user or {}).get("role")
     return isinstance(role, str) and role.strip().lower() == "admin"
@@ -392,6 +440,7 @@ def get_permissions(current_user_id):
         "permissions": mapping,
         "routes": ORDERED_MENU_ROUTES,
         "roles": sorted(mapping.keys()),
+        "deleteEnabled": _get_delete_enabled(),
     }
     user = get_user(current_user_id)
     if _is_admin(user):
@@ -428,6 +477,31 @@ def update_permissions(current_user_id):
             "logs": logs,
         }
     )
+
+
+@access_bp.route("/settings", methods=["GET"])
+@token_required
+def get_access_settings(current_user_id):
+    """Read global access feature flags (e.g. delete kill-switch)."""
+    _ensure_settings_table()
+    return success({"deleteEnabled": _get_delete_enabled()})
+
+
+@access_bp.route("/settings", methods=["PUT"])
+@token_required
+def update_access_settings(current_user_id):
+    user = get_user(current_user_id)
+    if not _is_admin(user):
+        return failure("Only Admin can update access settings.", 403)
+
+    _ensure_settings_table()
+    data = request.get_json(silent=True) or {}
+    raw = data.get("deleteEnabled")
+    if not isinstance(raw, bool):
+        return failure("'deleteEnabled' must be a boolean.", 400)
+
+    _set_delete_enabled(current_user_id, raw)
+    return success({"deleteEnabled": _get_delete_enabled()})
 
 
 @access_bp.route("/permissions/reset", methods=["POST"])

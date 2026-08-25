@@ -17,6 +17,14 @@ def shot_to_json(row: dict) -> dict:
         "clientId": row.get("client_id"),
         "clientName": row.get("client_name"),
         "department": row.get("department"),
+        # Multi-department support: shots.department can hold a comma-separated
+        # list (e.g. "ROTO,PAINT"). Expose it as a list while keeping the raw
+        # string above for backward compatibility.
+        "departments": [
+            part.strip()
+            for part in (row.get("department") or "").split(",")
+            if part.strip()
+        ],
         "shotCode": row.get("shot_code"),
         "frameIn": row.get("frame_in"),
         "frameOut": row.get("frame_out"),

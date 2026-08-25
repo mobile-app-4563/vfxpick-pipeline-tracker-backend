@@ -10,8 +10,15 @@ from datetime import datetime
 from flask import Blueprint, request
 
 from auth.middleware import token_required
-from common.constants import BROAD_ACCESS_ROLES, DEPARTMENTS, SHOT_STATUSES
-from common.db_utils import generate_prefixed_id, get_user, run_query, to_iso
+from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
+from common.options_store import effective_pipeline_departments
+from common.db_utils import (
+    generate_prefixed_id,
+    get_user,
+    run_query,
+    to_iso,
+    to_sql_date,
+)
 from common.http import failure, success
 from database.connection import get_db
 
@@ -128,8 +135,11 @@ def sync_production_grid(current_user_id):
             for client_key, db_column in GRID_FIELDS.items():
                 if client_key in updates:
                     value = updates[client_key]
-                    # Normalise empty strings to NULL for date columns
-                    if db_column in _DATE_COLUMNS and value in ("", None):
+                    # Normalise empty strings to NULL and validate dates so
+                    # garbage text can never become MySQL 0000-00-00.
+                    if db_column in _DATE_COLUMNS:
+                        value = to_sql_date(value)
+                    elif value in ("", None):
                         value = None
                     sets.append(f"{db_column} = %s")
                     params.append(value)
@@ -247,19 +257,19 @@ def _grid_db_params(row, status):
     return (
         row.get("coordinator"),
         row.get("month"),
-        row.get("shotsReceivedDate"),
+        to_sql_date(row.get("shotsReceivedDate")),
         row.get("clientForRef"),
-        row.get("wipEta"),
-        row.get("eta"),
+        to_sql_date(row.get("wipEta")),
+        to_sql_date(row.get("eta")),
         _grid_int(row.get("frames")),
         row.get("tasks"),
         row.get("reviewNotes"),
         status,
-        row.get("deliveredOn"),
+        to_sql_date(row.get("deliveredOn")),
         row.get("workStation"),
         _grid_float(row.get("shotMandays")),
         _grid_float(row.get("approvedClientMd")),
-        row.get("flEta"),
+        to_sql_date(row.get("flEta")),
         _grid_float(row.get("flMandays")),
     )
 
@@ -286,11 +296,18 @@ def create_production_grid_row(current_user_id):
     shot_code = _grid_null(data.get("shotCode"))
     tasks = _grid_null(data.get("tasks")) or _grid_null(data.get("department"))
     if tasks:
-        tasks = tasks.upper()
+        # A grid row may cover multiple comma-separated departments.
+        tasks = ",".join(
+            part.strip().upper()
+            for part in tasks.split(",")
+            if part.strip()
+        )
 
     if not shot_code or not tasks:
         return failure("shotCode and tasks (department) are required", 400)
-    if tasks not in DEPARTMENTS:
+    task_parts = [t.strip() for t in tasks.split(",") if t.strip()]
+    valid_depts = effective_pipeline_departments()
+    if not task_parts or any(t not in valid_depts for t in task_parts):
         return failure(f"Invalid department '{tasks}'.", 400)
 
     conn = get_db()
@@ -377,11 +394,18 @@ def bulk_upsert_production_grid(current_user_id):
         shot_code = _grid_null(row.get("shotCode"))
         tasks = _grid_null(row.get("tasks")) or _grid_null(row.get("department"))
         if tasks:
-            tasks = tasks.upper()
+            # A grid row may cover multiple comma-separated departments.
+            tasks = ",".join(
+                part.strip().upper()
+                for part in tasks.split(",")
+                if part.strip()
+            )
         if not shot_code or not tasks:
             errors.append(f"Row {idx}: shotCode and tasks (department) are required.")
             continue
-        if tasks not in DEPARTMENTS:
+        task_parts = [t.strip() for t in tasks.split(",") if t.strip()]
+        valid_depts = effective_pipeline_departments()
+        if not task_parts or any(t not in valid_depts for t in task_parts):
             errors.append(f"Row {idx}: invalid department '{tasks}'.")
             continue
         valid_rows.append((idx, row, shot_code, tasks))

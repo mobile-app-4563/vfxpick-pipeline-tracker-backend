@@ -26,16 +26,27 @@ tasks_bp = Blueprint("tasks", __name__)
 
 
 def _can_access(user, department):
-    return user and (user["role"] in BROAD_ACCESS_ROLES or user["department"] == department)
+    if not user:
+        return False
+    if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    # department may be a comma-separated list (multi-department shot).
+    depts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    return user["department"] in depts
 
 
 def _notify_department_supervisors(department, message, notif_type):
+    # A shot may span multiple comma-separated departments — notify each.
+    dept_parts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    if not dept_parts:
+        return
+    placeholders = ", ".join(["%s"] * len(dept_parts))
     supervisors = run_query(
-        """
+        f"""
         SELECT user_id FROM users
-        WHERE department = %s AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
+        WHERE department IN ({placeholders}) AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
         """,
-        (department,),
+        tuple(dept_parts),
         fetch_all=True,
     ) or []
     for sup in supervisors:
@@ -61,18 +72,22 @@ def department_view(current_user_id):
     if department:
         if not _can_access(user, department):
             return failure("You are not allowed to access this department.", 403)
+        # department may itself be a comma-separated list; match any part.
+        dept_parts = [d.strip() for d in department.split(",") if d.strip()]
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(dept_parts))
         rows = run_query(
-            SHOT_SELECT + " WHERE s.department = %s ORDER BY s.allocated_date DESC, s.shot_code",
-            (department,),
+            SHOT_SELECT
+            + f" WHERE ({dept_clause}) ORDER BY s.allocated_date DESC, s.shot_code",
+            tuple(dept_parts),
             fetch_all=True,
         ) or []
         return success({"shots": [shot_to_json(r) for r in rows]})
 
     if broad:
-        placeholders = ", ".join(["%s"] * len(DEPARTMENTS))
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(DEPARTMENTS))
         rows = run_query(
             SHOT_SELECT
-            + f" WHERE s.department IN ({placeholders}) ORDER BY s.allocated_date DESC, s.shot_code",
+            + f" WHERE ({dept_clause}) ORDER BY s.allocated_date DESC, s.shot_code",
             tuple(DEPARTMENTS),
             fetch_all=True,
         ) or []
@@ -82,7 +97,7 @@ def department_view(current_user_id):
         return failure("You do not have access to any pipeline department.", 403)
 
     rows = run_query(
-        SHOT_SELECT + " WHERE s.department = %s ORDER BY s.allocated_date DESC, s.shot_code",
+        SHOT_SELECT + " WHERE FIND_IN_SET(%s, s.department) ORDER BY s.allocated_date DESC, s.shot_code",
         (user["department"],),
         fetch_all=True,
     ) or []

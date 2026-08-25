@@ -6,7 +6,7 @@ pooled connections for every query.
 """
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 
 from database.connection import get_db_cursor
@@ -112,6 +112,43 @@ def to_iso(value):
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
+
+
+def to_sql_date(value):
+    """Validate and normalize a date value for DATE columns.
+
+    Accepts ``datetime``/``date`` objects, ISO strings (``YYYY-MM-DD``,
+    ``YYYY-MM-DD HH:MM:SS``) and returns the ``YYYY-MM-DD`` string.  Anything
+    invalid — empty text, ``0000-00-00``, garbage — becomes ``None`` so MySQL
+    never coerces bad input into a zero date again.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        value = str(value)
+    text = value.strip()
+    if not text:
+        return None
+    # Excel serial numbers occasionally arrive as numeric strings.
+    try:
+        num = float(text)
+        if 1 <= num < 70000:
+            serial = int(num)
+            return (datetime(1899, 12, 30) + timedelta(days=serial)).date().isoformat()
+        return None
+    except ValueError:
+        pass
+    # ISO / standard datetime strings ("2025-05-01", "2025-05-01 10:30:00").
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
 
 
 def parse_assets(value):

@@ -24,7 +24,13 @@ def _accessible_departments(user):
 
 
 def _can_access(user, department):
-    return user and (user["role"] in BROAD_ACCESS_ROLES or user["department"] == department)
+    if not user:
+        return False
+    if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    # department may be a comma-separated list (multi-department shot).
+    depts = [d.strip() for d in (department or "").split(",") if d.strip()]
+    return user["department"] in depts
 
 
 def _notify_concern_team(shot, current_user_id, message):
@@ -34,16 +40,19 @@ def _notify_concern_team(shot, current_user_id, message):
     if artist_id:
         recipients.add(artist_id)
 
-    dept_rows = run_query(
-        """
-        SELECT user_id FROM users
-        WHERE department = %s AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
-        """,
-        (shot["department"],),
-        fetch_all=True,
-    ) or []
-    for row in dept_rows:
-        recipients.add(row["user_id"])
+    dept_parts = [d.strip() for d in (shot.get("department") or "").split(",") if d.strip()]
+    if dept_parts:
+        placeholders = ", ".join(["%s"] * len(dept_parts))
+        dept_rows = run_query(
+            f"""
+            SELECT user_id FROM users
+            WHERE department IN ({placeholders}) AND role IN ('Supervisor', 'Team Lead') AND status = 'Active'
+            """,
+            tuple(dept_parts),
+            fetch_all=True,
+        ) or []
+        for row in dept_rows:
+            recipients.add(row["user_id"])
 
     broad_rows = run_query(
         """
@@ -79,13 +88,15 @@ def list_client_feedback(current_user_id):
     params = []
 
     if department:
-        if department not in allowed_departments:
+        requested = [d.strip() for d in department.split(",") if d.strip()]
+        if not requested or any(d not in allowed_departments for d in requested):
             return failure("You are not allowed to access this department.", 403)
-        clauses.append("s.department = %s")
-        params.append(department)
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(requested))
+        clauses.append(f"({dept_clause})")
+        params.extend(requested)
     else:
-        placeholders = ", ".join(["%s"] * len(allowed_departments))
-        clauses.append(f"s.department IN ({placeholders})")
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(allowed_departments))
+        clauses.append(f"({dept_clause})")
         params.extend(allowed_departments)
 
     if client_id:

@@ -61,3 +61,24 @@ def list_options(category):
         fetch_all=True,
     ) or []
     return [(r.get("value") or "").strip() for r in rows if (r.get("value") or "").strip()]
+
+
+def effective_pipeline_departments():
+    """Static DEPARTMENTS + dynamically added pipeline department options.
+
+    ``common.constants.DEPARTMENTS`` is a hard-coded default list, but
+    departments added at runtime via ``POST /auth/departments`` only live in
+    the option store.  Create/upsert validation must accept those too, so this
+    helper returns the merged, de-duplicated list.
+    """
+    from common.constants import DEPARTMENTS
+
+    ordered = []
+    seen = set()
+    for value in list(DEPARTMENTS) + list_options(PIPELINE_DEPARTMENT_CATEGORY):
+        value = (value or "").strip()
+        if not value or value in seen:
+            continue
+        ordered.append(value)
+        seen.add(value)
+    return ordered

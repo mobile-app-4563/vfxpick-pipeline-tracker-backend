@@ -237,8 +237,11 @@ def show_shots(_current_user_id, show_id):
     query = SHOT_SELECT + " WHERE s.show_id = %s"
     params = [show_id]
     if department:
-        query += " AND s.department = %s"
-        params.append(department)
+        dept_parts = [d.strip() for d in department.split(",") if d.strip()]
+        if dept_parts:
+            dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(dept_parts))
+            query += f" AND ({dept_clause})"
+            params.extend(dept_parts)
     query += " ORDER BY s.shot_code"
 
     rows = run_query(query, tuple(params), fetch_all=True) or []

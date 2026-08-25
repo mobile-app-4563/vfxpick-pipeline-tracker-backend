@@ -115,10 +115,18 @@ def options():
         USER_DEPARTMENTS,
         list_options(DEPARTMENT_CATEGORY) + _distinct_values("users", "department"),
     )
+    # shots.department may hold a comma-separated list (multi-department
+    # shots) — split it so every department appears as its own option.
+    raw_pipeline_values = _distinct_values("shots", "department")
+    split_pipeline_values = []
+    for value in raw_pipeline_values:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                split_pipeline_values.append(part)
     pipeline_departments = _merge_ordered(
         DEPARTMENTS,
-        list_options(PIPELINE_DEPARTMENT_CATEGORY)
-        + _distinct_values("shots", "department"),
+        list_options(PIPELINE_DEPARTMENT_CATEGORY) + split_pipeline_values,
     )
     artist_levels = _merge_ordered(
         ARTIST_LEVELS,
@@ -157,6 +165,38 @@ def options():
     )
     cache.set(cache_key, payload, timeout=300)
     return payload
+
+
+@auth_bp.route("/departments", methods=["POST"])
+@token_required
+def add_department(current_user_id):
+    """Create a new department in both the user and pipeline lists.
+
+    Restricted to broad-access roles (Admin / Production / Management).
+    The department is added to the ``department`` (registration) and
+    ``pipelineDepartment`` (shot workflow) option categories so it shows up
+    everywhere.  The cached ``/auth/options`` response is busted so the new
+    department is picked up immediately.
+    """
+    user = get_user(current_user_id)
+    if not user or user["role"] not in BROAD_ACCESS_ROLES:
+        return failure("You are not allowed to add departments.", 403)
+
+    data = request.get_json(silent=True) or {}
+    department = (data.get("department") or data.get("name") or "").strip()
+    if not department:
+        return failure("department is required.", 400)
+
+    upsert_option(DEPARTMENT_CATEGORY, department)
+    upsert_option(PIPELINE_DEPARTMENT_CATEGORY, department)
+
+    # Bust the /auth/options cache so all screens see the new department
+    # without waiting out the 5-minute TTL.
+    from common.cache_instance import cache
+
+    cache.delete("app_options")
+
+    return success({"department": department}, 201)
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -212,6 +252,12 @@ def register():
 
     upsert_option(ROLE_CATEGORY, role)
     upsert_option(DEPARTMENT_CATEGORY, department)
+    # Register runs pre-login (no token), so the add-department endpoint may
+    # not be callable here.  Persist the chosen department as a pipeline
+    # department too so it appears in all import sections.
+    upsert_option(PIPELINE_DEPARTMENT_CATEGORY, department)
+    from common.cache_instance import cache
+    cache.delete("app_options")
 
     existing = run_query(
         "SELECT user_id FROM users WHERE LOWER(email) = %s", (email,), fetch_one=True

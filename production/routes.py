@@ -6,12 +6,13 @@ Includes role-based access control.
 """
 
 from datetime import datetime
+import re
 
 from flask import Blueprint, request
 
 from auth.middleware import token_required
 from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
-from common.options_store import effective_pipeline_departments
+from common.audit import write_activity_log
 from common.db_utils import (
     generate_prefixed_id,
     get_user,
@@ -46,6 +47,43 @@ GRID_FIELDS = {
     "flEta": "fl_eta",
     "flMandays": "fl_mandays",
 }
+
+
+def _show_family(row):
+    """Group key used to keep packages of the same show together.
+
+    Package names often carry a numeric suffix (e.g. "Princess Cruises_1",
+    "Princess Cruises_2"); the suffix is stripped so those packages land in
+    the same group. Falls back to the client name when no show is set.
+    """
+    show = (row.get("show_name") or "").strip()
+    family = re.sub(r"_\d+$", "", show).strip()
+    if family:
+        return family
+    client = (row.get("client_name") or "").strip()
+    return client or show
+
+
+def _order_grid_rows(rows):
+    """Sort grid rows so packages of the same show are grouped together.
+
+    Show groups are ordered newest-first (by the newest row in the group);
+    rows within a group keep their arrival order.
+    """
+    groups = {}
+    for row in rows:
+        groups.setdefault(_show_family(row), []).append(row)
+
+    def _group_newest(group):
+        stamps = [r.get("created_at") for r in group if r.get("created_at") is not None]
+        return max(stamps) if stamps else datetime.min
+
+    ordered = []
+    for _, group in sorted(
+        groups.items(), key=lambda kv: _group_newest(kv[1]), reverse=True
+    ):
+        ordered.extend(group)
+    return ordered
 
 
 def _grid_to_json(row, sno):
@@ -89,13 +127,16 @@ def get_production_grid(current_user_id):
         SELECT grid_id, coordinator, month, shots_received_date, client_for_ref,
                client_name, show_name, wip_eta, eta, shot_code, frames, tasks,
                review_notes, status, delivered_on, work_station, shot_mandays,
-               approved_client_md, fl_eta, fl_mandays
+               approved_client_md, fl_eta, fl_mandays, created_at
         FROM production_grid
         ORDER BY created_at ASC
     """
 
     try:
         rows = run_query(query, fetch_all=True)
+        # Group packages of the same show together; newest show family first,
+        # arrival order within a family (see _order_grid_rows).
+        rows = _order_grid_rows(rows)
         grid = [_grid_to_json(row, idx + 1) for idx, row in enumerate(rows)]
         return success({"rows": grid, "total": len(grid)})
     except Exception as e:
@@ -154,6 +195,14 @@ def sync_production_grid(current_user_id):
             run_query(
                 f"UPDATE production_grid SET {', '.join(sets)} WHERE grid_id = %s",
                 params,
+            )
+            write_activity_log(
+                current_user_id,
+                "Production Management",
+                "UPDATE",
+                "Production Grid",
+                grid_id,
+                {"fields": list(updates.keys()), "values": updates},
             )
             updated_count += 1
         except Exception as e:
@@ -283,8 +332,8 @@ def create_production_grid_row(current_user_id):
            "tasks": "ROTO", ...grid fields...}
     Client/show are stored as plain names in production_grid (no dependency
     on the shared clients/shows tables). If a row with the same
-    (client_name, show_name, tasks, shot_code) already exists it is UPDATED
-    with the incoming data instead of creating a duplicate.
+    (client_name, show_name, tasks, shot_code, review_notes) already exists it
+    is UPDATED with the incoming data instead of creating a duplicate.
     """
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
@@ -305,21 +354,24 @@ def create_production_grid_row(current_user_id):
 
     if not shot_code or not tasks:
         return failure("shotCode and tasks (department) are required", 400)
-    task_parts = [t.strip() for t in tasks.split(",") if t.strip()]
-    valid_depts = effective_pipeline_departments()
-    if not task_parts or any(t not in valid_depts for t in task_parts):
-        return failure(f"Invalid department '{tasks}'.", 400)
+
+    status = _grid_status(data.get("status"))
+    params = _grid_db_params(data, status)
+    review_notes = _grid_null(data.get("reviewNotes")) or ""
 
     conn = get_db()
     try:
         cursor = conn.cursor(dictionary=True, buffered=True)
 
-        # Upsert: a row with the same (client, show, tasks, shot_code) already
-        # exists → update it with the incoming data instead of duplicating it.
+        # Upsert: a row with the same (client, show, tasks, shot_code,
+        # review_notes) already exists → update it with the incoming data
+        # instead of duplicating it. Different feedback rounds (review notes)
+        # are treated as distinct rows.
         cursor.execute(
             "SELECT grid_id FROM production_grid "
-            "WHERE client_name = %s AND show_name = %s AND tasks = %s AND shot_code = %s",
-            (client_name, show_name, tasks, shot_code),
+            "WHERE client_name = %s AND show_name = %s AND tasks = %s "
+            "AND shot_code = %s AND COALESCE(review_notes, '') = COALESCE(%s, '')",
+            (client_name, show_name, tasks, shot_code, review_notes),
         )
         existing = cursor.fetchone()
         if existing:
@@ -331,6 +383,14 @@ def create_production_grid_row(current_user_id):
             """
             cursor.execute(update_sql, (*params, existing["grid_id"]))
             conn.commit()
+            write_activity_log(
+                current_user_id,
+                "Production Management",
+                "UPDATE",
+                "Production Grid",
+                existing["grid_id"],
+                {"source": "manual create", "status": status},
+            )
             return success(
                 {
                     "shotId": existing["grid_id"],
@@ -352,6 +412,14 @@ def create_production_grid_row(current_user_id):
             insert_sql, (grid_id, client_name, show_name, shot_code, *params)
         )
         conn.commit()
+        write_activity_log(
+            current_user_id,
+            "Production Management",
+            "CREATE",
+            "Production Grid",
+            grid_id,
+            {"source": "manual create", "status": status},
+        )
         return success(
             {"shotId": grid_id, "message": "Row created successfully"},
             201,
@@ -371,9 +439,11 @@ def bulk_upsert_production_grid(current_user_id):
     Body: {"rows": [ {grid fields + client/show names}, ... ]}
     Client/show are stored as plain names in production_grid — no dependency
     on the shared clients/shows tables. Upserts on
-    (client_name, show_name, tasks, shot_code). Duplicate rows WITHIN the same
-    batch also update the first occurrence (never duplicated). Rows missing
-    shotCode or an invalid department are reported in ``errors``.
+    (client_name, show_name, tasks, shot_code, review_notes) so the same shot
+    with different tasks or a different feedback round (review notes) keeps its
+    own row. Duplicate rows WITHIN the same batch also update the first
+    occurrence (never duplicated). Rows missing shotCode or an invalid
+    department are reported in ``errors``.
     """
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
@@ -403,11 +473,6 @@ def bulk_upsert_production_grid(current_user_id):
         if not shot_code or not tasks:
             errors.append(f"Row {idx}: shotCode and tasks (department) are required.")
             continue
-        task_parts = [t.strip() for t in tasks.split(",") if t.strip()]
-        valid_depts = effective_pipeline_departments()
-        if not task_parts or any(t not in valid_depts for t in task_parts):
-            errors.append(f"Row {idx}: invalid department '{tasks}'.")
-            continue
         valid_rows.append((idx, row, shot_code, tasks))
 
     if not valid_rows:
@@ -423,24 +488,34 @@ def bulk_upsert_production_grid(current_user_id):
         id_state = {}
 
         # ── Batch-fetch existing rows per (client, show, tasks) ────────────
+        # review_notes is part of the identity so each feedback round of the
+        # same shot/task is kept as its own row.
         existing_map = {}
         unique_groups = {
             (
                 _grid_null(row.get("client")) or "",
                 _grid_null(row.get("show")) or "",
                 tasks,
+                _grid_null(row.get("reviewNotes")) or "",
             )
             for idx, row, _, tasks in valid_rows
         }
-        for client_name, show_name, tasks in unique_groups:
+        for client_name, show_name, tasks, review_notes in unique_groups:
             cursor.execute(
-                "SELECT grid_id, client_name, show_name, tasks, shot_code "
-                "FROM production_grid WHERE client_name = %s AND show_name = %s AND tasks = %s",
-                (client_name, show_name, tasks),
+                "SELECT grid_id, client_name, show_name, tasks, shot_code, review_notes "
+                "FROM production_grid WHERE client_name = %s AND show_name = %s "
+                "AND tasks = %s AND COALESCE(review_notes, '') = COALESCE(%s, '')",
+                (client_name, show_name, tasks, review_notes),
             )
             for r in cursor.fetchall():
                 existing_map[
-                    (r["client_name"], r["show_name"], r["tasks"], r["shot_code"])
+                    (
+                        r["client_name"],
+                        r["show_name"],
+                        r["tasks"],
+                        r["shot_code"],
+                        r["review_notes"] or "",
+                    )
                 ] = r["grid_id"]
 
         update_sql = f"""
@@ -459,14 +534,23 @@ def bulk_upsert_production_grid(current_user_id):
         for idx, row, shot_code, tasks in valid_rows:
             client_name = _grid_null(row.get("client")) or ""
             show_name = _grid_null(row.get("show")) or ""
+            review_notes = _grid_null(row.get("reviewNotes")) or ""
             try:
                 status = _grid_status(row.get("status"))
                 existing_grid_id = existing_map.get(
-                    (client_name, show_name, tasks, shot_code)
+                    (client_name, show_name, tasks, shot_code, review_notes)
                 )
                 params = _grid_db_params(row, status)
                 if existing_grid_id:
                     cursor.execute(update_sql, (*params, existing_grid_id))
+                    write_activity_log(
+                        current_user_id,
+                        "Production Management",
+                        "UPDATE",
+                        "Production Grid",
+                        existing_grid_id,
+                        {"source": "bulk upsert", "status": status},
+                    )
                     updated += 1
                 else:
                     grid_id = _next_prefixed_id(
@@ -483,7 +567,17 @@ def bulk_upsert_production_grid(current_user_id):
                     )
                     # Remember in-batch inserts so a duplicate row later in the
                     # same file updates this row instead of duplicating it.
-                    existing_map[(client_name, show_name, tasks, shot_code)] = grid_id
+                    existing_map[
+                        (client_name, show_name, tasks, shot_code, review_notes)
+                    ] = grid_id
+                    write_activity_log(
+                        current_user_id,
+                        "Production Management",
+                        "CREATE",
+                        "Production Grid",
+                        grid_id,
+                        {"source": "bulk upsert", "status": status},
+                    )
                     created += 1
             except Exception as e:
                 errors.append(f"Row {idx}: {e}")
@@ -516,6 +610,13 @@ def delete_production_grid_row(current_user_id, grid_id):
 
     try:
         run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        write_activity_log(
+            current_user_id,
+            "Production Management",
+            "DELETE",
+            "Production Grid",
+            grid_id,
+        )
         return success(
             {"message": "Grid row deleted successfully", "gridId": grid_id}
         )
@@ -553,6 +654,14 @@ def bulk_delete_production_grid(current_user_id):
             )
             if cursor.rowcount:
                 deleted += 1
+                write_activity_log(
+                    current_user_id,
+                    "Production Management",
+                    "DELETE",
+                    "Production Grid",
+                    grid_id,
+                    {"source": "bulk delete"},
+                )
             else:
                 skipped += 1
         conn.commit()
@@ -742,6 +851,14 @@ def create_production_concern(current_user_id):
                 "Production",
             ],
         )
+        write_activity_log(
+            current_user_id,
+            "Production",
+            "CREATE",
+            "Production Concern",
+            production_id,
+            {"status": status, "priority": priority},
+        )
         return success(
             {"productionId": production_id, "message": "Concern created successfully"},
             201,
@@ -803,6 +920,14 @@ def update_production_concern(current_user_id, production_id):
 
     try:
         run_query(query, params)
+        write_activity_log(
+            current_user_id,
+            "Production",
+            "UPDATE",
+            "Production Concern",
+            production_id,
+            {"fields": list(data.keys()), "values": data},
+        )
         return success({"message": "Concern updated successfully"})
     except Exception as e:
         return failure(f"Failed to update concern: {e}", 500)
@@ -820,6 +945,13 @@ def delete_production_concern(current_user_id, production_id):
 
     try:
         run_query(query, [production_id])
+        write_activity_log(
+            current_user_id,
+            "Production",
+            "DELETE",
+            "Production Concern",
+            production_id,
+        )
         return success({"message": "Concern deleted successfully"})
     except Exception as e:
         return failure(f"Failed to delete concern: {e}", 500)

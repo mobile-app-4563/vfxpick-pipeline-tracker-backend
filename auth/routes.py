@@ -5,6 +5,7 @@ import bcrypt
 import jwt
 from flask import Blueprint, request
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.constants import (
     ARTIST_LEVELS,
     ARTIST_STATUSES,
@@ -195,6 +196,14 @@ def add_department(current_user_id):
     from common.cache_instance import cache
 
     cache.delete("app_options")
+    write_activity_log(
+        current_user_id,
+        "Auth",
+        "CREATE",
+        "Department",
+        department,
+        {},
+    )
 
     return success({"department": department}, 201)
 
@@ -221,6 +230,14 @@ def login():
         return failure("Invalid password.", 401)
 
     token = _sign_token(user["user_id"], user["role"])
+    write_activity_log(
+        user["user_id"],
+        "Auth",
+        "LOGIN",
+        "User",
+        user["user_id"],
+        {"email": email, "role": user["role"]},
+    )
     user_response = {
         "userId": user["user_id"],
         "name": user["name"],
@@ -277,6 +294,14 @@ def register():
         (user_id, full_name, email, department, password_hash, role, avatar, phone, employee_id),
     )
     run_query("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
+    write_activity_log(
+        user_id,
+        "Auth",
+        "CREATE",
+        "User",
+        user_id,
+        {"name": full_name, "email": email, "department": department, "role": role},
+    )
 
     token = _sign_token(user_id, role)
     return success(
@@ -481,6 +506,20 @@ def update_profile(current_user_id):
         (name, email, phone, employee_id, avatar, level, password_hash, current_user_id),
     )
     invalidate_user_cache(current_user_id)
+    write_activity_log(
+        current_user_id,
+        "Auth",
+        "UPDATE",
+        "Profile",
+        current_user_id,
+        {
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "level": level,
+            "passwordChanged": bool(new_password),
+        },
+    )
 
     updated = get_user(current_user_id)
     return success({"user": _serialize_user(updated)})

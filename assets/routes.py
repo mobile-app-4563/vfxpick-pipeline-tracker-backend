@@ -7,6 +7,7 @@ attachment raises a notification (feature iv: shared document / file attachment)
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.db_utils import create_notification, generate_prefixed_id, get_user, run_query, to_iso
 from common.http import failure, success
 
@@ -65,6 +66,14 @@ def add_asset(current_user_id):
         """,
         (attachment_id, shot_id, current_user_id, file_name, file_url, data.get("fileType")),
     )
+    write_activity_log(
+        current_user_id,
+        "Assets",
+        "CREATE",
+        "Attachment",
+        attachment_id,
+        {"fileName": file_name, "shotId": shot_id, "fileUrl": file_url},
+    )
 
     if shot_id:
         shot = run_query(
@@ -114,4 +123,12 @@ def delete_asset(_current_user_id, attachment_id):
     if not existing:
         return failure("Attachment not found", 404)
     run_query("DELETE FROM attachments WHERE attachment_id = %s", (attachment_id,))
+    write_activity_log(
+        _current_user_id,
+        "Assets",
+        "DELETE",
+        "Attachment",
+        attachment_id,
+        {},
+    )
     return success({"message": "Attachment deleted", "attachmentId": attachment_id})

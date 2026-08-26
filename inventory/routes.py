@@ -1,5 +1,6 @@
 from flask import Blueprint, request
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.db_utils import get_user, run_query
 from common.http import failure, success
 from common.constants import BROAD_ACCESS_ROLES
@@ -104,6 +105,22 @@ def create_item(current_user_id):
             """,
             (item_name, category, serial_number, status, assigned_to, notes)
         )
+        last_row = run_query("SELECT LAST_INSERT_ID() AS item_id", fetch_one=True)
+        item_id = last_row["item_id"] if last_row else None
+        write_activity_log(
+            current_user_id,
+            "Inventory",
+            "CREATE",
+            "Inventory Item",
+            str(item_id) if item_id is not None else item_name,
+            {
+                "itemName": item_name,
+                "category": category,
+                "serialNumber": serial_number,
+                "status": status,
+                "assignedToUserId": assigned_to,
+            },
+        )
         return success({"message": "Inventory item created successfully."})
     except Exception as e:
         if "Duplicate entry" in str(e) or "serial_number" in str(e):
@@ -138,6 +155,20 @@ def update_item(current_user_id, item_id):
             """,
             (item_name, category, serial_number, status, assigned_to, notes, item_id)
         )
+        write_activity_log(
+            current_user_id,
+            "Inventory",
+            "UPDATE",
+            "Inventory Item",
+            str(item_id),
+            {
+                "itemName": item_name,
+                "category": category,
+                "serialNumber": serial_number,
+                "status": status,
+                "assignedToUserId": assigned_to,
+            },
+        )
         return success({"message": "Inventory item updated successfully."})
     except Exception as e:
         if "Duplicate entry" in str(e) or "serial_number" in str(e):
@@ -153,4 +184,12 @@ def delete_item(current_user_id, item_id):
         
     _ensure_table()
     run_query("DELETE FROM inventory WHERE id = %s", (item_id,))
+    write_activity_log(
+        current_user_id,
+        "Inventory",
+        "DELETE",
+        "Inventory Item",
+        str(item_id),
+        {},
+    )
     return success({"message": "Inventory item deleted successfully."})

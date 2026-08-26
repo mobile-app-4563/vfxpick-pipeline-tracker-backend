@@ -12,6 +12,7 @@ Implements the workflow features:
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
     BROAD_ACCESS_ROLES,
@@ -162,6 +163,14 @@ def assign_shot(current_user_id, shot_id):
         "Task Assigned",
         artist_id,
     )
+    write_activity_log(
+        current_user_id,
+        "Tasks",
+        "ASSIGN",
+        "Shot",
+        shot_id,
+        {"artistId": artist_id, "artistName": artist.get("name")},
+    )
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
     return success({"shot": shot_to_json(row)})
 
@@ -199,6 +208,14 @@ def update_artist_status(current_user_id, shot_id):
 
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))
+    write_activity_log(
+        current_user_id,
+        "Tasks",
+        "STATUS_UPDATE",
+        "Shot",
+        shot_id,
+        {"statusType": "artist", "newStatus": artist_status, "fields": list(data.keys())},
+    )
 
     if submitted_for_qc:
         sender = user["name"] if user else "An artist"
@@ -237,6 +254,14 @@ def update_supervisor_status(current_user_id, shot_id):
         params.append(data["clientFeedback"])
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))
+    write_activity_log(
+        current_user_id,
+        "Tasks",
+        "STATUS_UPDATE",
+        "Shot",
+        shot_id,
+        {"statusType": "supervisor", "newStatus": supervisor_status, "fields": list(data.keys())},
+    )
 
     # Notify the assigned artist of feedback / approval.
     if shot["artist_id"]:

@@ -16,6 +16,7 @@ from common.constants import (
     USER_DEPARTMENTS,
     USER_ROLES,
 )
+from common.audit import write_activity_log
 from common.db_utils import generate_prefixed_id, get_user, initials, run_query
 from common.http import failure, success
 
@@ -155,6 +156,14 @@ def add_member(current_user_id):
         (user_id, name, email, department, password_hash, role, level, avatar),
     )
     run_query("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
+    write_activity_log(
+        current_user_id,
+        "Teams",
+        "CREATE",
+        "Team Member",
+        user_id,
+        {"name": name, "email": email, "department": department, "role": role},
+    )
 
     return success(
         {
@@ -192,6 +201,14 @@ def remove_member(current_user_id, user_id):
         (user_id,),
     )
     run_query("DELETE FROM users WHERE user_id = %s", (user_id,))
+    write_activity_log(
+        current_user_id,
+        "Teams",
+        "DELETE",
+        "Team Member",
+        user_id,
+        {"name": member.get("name"), "role": member.get("role")},
+    )
 
     return success({"message": "Team member removed", "userId": user_id})
 
@@ -233,6 +250,20 @@ def update_member(current_user_id, user_id):
         WHERE user_id = %s
         """,
         (name, department, role, level, avatar, user_id),
+    )
+
+    write_activity_log(
+        current_user_id,
+        "Teams",
+        "UPDATE",
+        "Team Member",
+        user_id,
+        {
+            "oldRole": member.get("role"),
+            "newRole": role,
+            "oldDepartment": member.get("department"),
+            "newDepartment": department,
+        },
     )
 
     updated = get_user(user_id)

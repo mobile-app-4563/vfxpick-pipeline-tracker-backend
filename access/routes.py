@@ -2,6 +2,7 @@ from flask import Blueprint, request
 
 from auth.middleware import token_required
 from common.constants import USER_ROLES
+from common.audit import ensure_activity_table, fetch_activity_logs
 from common.db_utils import get_user, run_query
 from common.http import failure, success
 from common.options_store import ROLE_CATEGORY, list_options, seed_options
@@ -26,6 +27,7 @@ ORDERED_MENU_ROUTES = [
     "/access-provider",
     "/inventory",
     "/profile",
+    "/audit-logs",
 ]
 
 _ARTIST_DEFAULTS = {
@@ -74,7 +76,7 @@ def _apply_route_invariants(mapping):
         if role in _FULL_ACCESS_ROLES:
             route_set.add("/hrms")
         if role == "Admin":
-            route_set.add("/access-provider")
+            route_set.update(ORDERED_MENU_ROUTES)
         mapping[role] = sorted(route_set)
     return mapping
 
@@ -94,6 +96,7 @@ def _ensure_table():
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    ensure_activity_table()
     try:
         run_query(
             """
@@ -271,7 +274,7 @@ def _default_permissions(roles=None):
         elif role in ("Supervisor", "Team Lead", "Admin", "Production", "Management"):
             values = set(_FULL_ACCESS_DEFAULTS)
             if role == "Admin":
-                values.add("/access-provider")
+                values.update(ORDERED_MENU_ROUTES)
             mapping[role] = sorted(values)
         else:
             mapping[role] = sorted(_ARTIST_DEFAULTS)
@@ -401,6 +404,7 @@ def _fetch_audit_logs(limit=200):
                a.changed_by_user_id,
                u.name AS changed_by_name,
                a.action,
+               u.email AS changed_by_username,
                a.role,
                a.route,
                a.old_allowed,
@@ -420,15 +424,31 @@ def _fetch_audit_logs(limit=200):
             "id": int(r["id"]),
             "changedByUserId": r["changed_by_user_id"],
             "changedByName": r.get("changed_by_name"),
+            "changedByUsername": r.get("changed_by_username"),
             "action": r["action"],
             "role": r["role"],
             "route": r["route"],
             "oldAllowed": bool(r["old_allowed"]),
             "newAllowed": bool(r["new_allowed"]),
             "changedAt": r["changed_at"].isoformat() if r.get("changed_at") else None,
+            "module": "Access Provider",
+            "entityType": "Menu Permission",
+            "entityId": r["route"],
+            "details": {
+                "role": r["role"],
+                "oldAllowed": bool(r["old_allowed"]),
+                "newAllowed": bool(r["new_allowed"]),
+            },
         }
         for r in rows
     ]
+
+
+def _fetch_all_audit_logs(limit=500):
+    logs = _fetch_audit_logs(limit=limit)
+    logs.extend(fetch_activity_logs(limit=limit))
+    logs.sort(key=lambda row: row.get("changedAt") or "", reverse=True)
+    return logs[:limit]
 
 
 @access_bp.route("/permissions", methods=["GET"])
@@ -444,7 +464,7 @@ def get_permissions(current_user_id):
     }
     user = get_user(current_user_id)
     if _is_admin(user):
-        payload["logs"] = _fetch_audit_logs()
+        payload["logs"] = _fetch_all_audit_logs()
     return success(payload)
 
 
@@ -467,7 +487,7 @@ def update_permissions(current_user_id):
     changes = _diff_permissions(previous, normalized)
     _save_permissions(normalized)
     _write_audit(current_user_id, "update", changes)
-    logs = _fetch_audit_logs()
+    logs = _fetch_all_audit_logs()
     return success(
         {
             "permissions": normalized,
@@ -517,7 +537,7 @@ def reset_permissions(current_user_id):
     changes = _diff_permissions(previous, defaults)
     _save_permissions(defaults)
     _write_audit(current_user_id, "reset", changes)
-    logs = _fetch_audit_logs()
+    logs = _fetch_all_audit_logs()
     return success(
         {
             "permissions": defaults,
@@ -544,4 +564,4 @@ def permission_audit(current_user_id):
         limit = 200
     limit = max(1, min(limit, 1000))
 
-    return success({"logs": _fetch_audit_logs(limit)})
+    return success({"logs": _fetch_all_audit_logs(limit)})

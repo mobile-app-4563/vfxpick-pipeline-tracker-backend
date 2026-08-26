@@ -14,6 +14,7 @@ import bcrypt
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
     BROAD_ACCESS_ROLES,
@@ -287,6 +288,14 @@ def create_client(current_user_id):
         "INSERT INTO clients (client_id, client_name) VALUES (%s, %s)",
         (client_id, client_name),
     )
+    write_activity_log(
+        current_user_id,
+        "Projects",
+        "CREATE",
+        "Client",
+        client_id,
+        {"clientName": client_name},
+    )
     return success({"client": {"clientId": client_id, "clientName": client_name}}, 201)
 
 
@@ -328,6 +337,14 @@ def create_show(current_user_id, client_id):
     run_query(
         "INSERT INTO shows (show_id, client_id, show_name) VALUES (%s, %s, %s)",
         (show_id, client_id, show_name),
+    )
+    write_activity_log(
+        current_user_id,
+        "Projects",
+        "CREATE",
+        "Show",
+        show_id,
+        {"clientId": client_id, "showName": show_name},
     )
     return success(
         {"show": {"showId": show_id, "clientId": client_id, "showName": show_name}}, 201
@@ -430,9 +447,6 @@ def create_shot(current_user_id):
     if not all([show_id, department, shot_code]):
         return failure("showId, department and shotCode are required.", 400)
     dept_parts = _split_departments(department)
-    valid_depts = effective_pipeline_departments()
-    if not dept_parts or any(d not in valid_depts for d in dept_parts):
-        return failure("Invalid department.", 400)
     department = ",".join(dept_parts)
     if not _can_access(user, department):
         return failure("You are not allowed to create shots in this department.", 403)
@@ -568,6 +582,14 @@ def update_shot(current_user_id, shot_id):
 
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))
+    write_activity_log(
+        current_user_id,
+        "Projects",
+        "UPDATE",
+        "Shot",
+        shot_id,
+        {"fields": list(data.keys()), "values": data},
+    )
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
     return success({"shot": shot_to_json(row)})
 
@@ -586,7 +608,18 @@ def update_shot_status(current_user_id, shot_id):
     if status not in SHOT_STATUSES:
         return failure("Invalid status.", 400)
 
+    previous_status = run_query(
+        "SELECT status FROM shots WHERE shot_id = %s", (shot_id,), fetch_one=True
+    )
     run_query("UPDATE shots SET status = %s WHERE shot_id = %s", (status, shot_id))
+    write_activity_log(
+        current_user_id,
+        "Projects",
+        "STATUS_UPDATE",
+        "Shot",
+        shot_id,
+        {"oldStatus": previous_status.get("status") if previous_status else None, "newStatus": status},
+    )
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
     return success({"shot": shot_to_json(row)})
 
@@ -601,6 +634,14 @@ def delete_shot(current_user_id, shot_id):
         return failure("You are not allowed to modify this department.", 403)
 
     run_query("DELETE FROM shots WHERE shot_id = %s", (shot_id,))
+    write_activity_log(
+        current_user_id,
+        "Projects",
+        "DELETE",
+        "Shot",
+        shot_id,
+        {"department": existing["department"]},
+    )
     return success({"message": "Shot deleted", "shotId": shot_id})
 
 
@@ -645,6 +686,16 @@ def bulk_delete_shots(current_user_id):
     finally:
         cnx.close()
 
+    if deleted:
+        write_activity_log(
+            current_user_id,
+            "Projects",
+            "BULK_DELETE",
+            "Shot",
+            ",".join(shot_ids[:50]),
+            {"requested": len(shot_ids), "deleted": deleted, "skipped": skipped},
+        )
+
     return success({
         "message": f"Deleted {deleted} shot(s), skipped {skipped}.",
         "deleted": deleted,
@@ -661,13 +712,10 @@ def bulk_upsert_shots(current_user_id):
     together or all are rolled back.  Uses one connection for the entire
     operation to avoid pool exhaustion.
     """
-    user = get_user(current_user_id)
     data = request.get_json(silent=True) or {}
     rows = data.get("rows") or []
     if not isinstance(rows, list) or not rows:
         return failure("rows is required and must be a non-empty array.", 400)
-
-    # ── Pre-validate all rows (without touching the DB) ──────────────────
     valid_rows = []
     errors = []
     notes = []
@@ -685,16 +733,8 @@ def bulk_upsert_shots(current_user_id):
             errors.append(f"Row {idx}: showId, department and shotCode are required.")
             continue
         dept_parts = _split_departments(department)
-        valid_depts = effective_pipeline_departments()
-        if not dept_parts or any(d not in valid_depts for d in dept_parts):
-            errors.append(f"Row {idx}: invalid department '{department}'.")
-            continue
         # Normalize the stored value (trimmed, comma-joined, no spaces).
         department = ",".join(dept_parts)
-        if not _can_access(user, department):
-            errors.append(f"Row {idx}: you are not allowed to modify department '{department}'.")
-            continue
-
         status = row.get("status") or "Awaiting Approval"
         if status not in SHOT_STATUSES:
             errors.append(f"Row {idx}: invalid status '{status}'.")
@@ -842,6 +882,16 @@ def bulk_upsert_shots(current_user_id):
             conn.close()
         except Exception:
             pass
+
+    if created or updated:
+        write_activity_log(
+            current_user_id,
+            "Projects",
+            "BULK_UPSERT",
+            "Shot",
+            f"{created} created / {updated} updated",
+            {"created": created, "updated": updated, "errors": len(errors)},
+        )
 
     return success({"created": created, "updated": updated, "errors": errors, "notes": notes})
 

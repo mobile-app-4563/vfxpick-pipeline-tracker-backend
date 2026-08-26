@@ -7,6 +7,7 @@ Tracks bidding workflow: pending → approved → rejected.
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.db_utils import get_user, run_query
 from common.http import failure, success
 from common.serializers import SHOT_SELECT, shot_to_json
@@ -206,6 +207,14 @@ def update_shot_bids(current_user_id, shot_id):
 
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))
+    write_activity_log(
+        current_user_id,
+        "Bidding",
+        "UPDATE",
+        "Shot Bids",
+        shot_id,
+        {json_key: data.get(json_key) for json_key in field_map if json_key in data},
+    )
 
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
     return success({"shot": shot_to_json(row)})
@@ -232,6 +241,14 @@ def approve_bid(current_user_id, shot_id):
         "UPDATE shots SET status = %s WHERE shot_id = %s",
         ("Approved", shot_id),
     )
+    write_activity_log(
+        current_user_id,
+        "Bidding",
+        "APPROVE",
+        "Shot",
+        shot_id,
+        {"oldStatus": existing.get("status"), "newStatus": "Approved"},
+    )
 
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)
     return success({"shot": shot_to_json(row)})
@@ -254,6 +271,14 @@ def reject_bid(current_user_id, shot_id):
     run_query(
         "UPDATE shots SET status = %s WHERE shot_id = %s",
         ("Hold", shot_id),
+    )
+    write_activity_log(
+        current_user_id,
+        "Bidding",
+        "REJECT",
+        "Shot",
+        shot_id,
+        {"oldStatus": existing.get("status"), "newStatus": "Hold"},
     )
 
     row = run_query(SHOT_SELECT + " WHERE s.shot_id = %s", (shot_id,), fetch_one=True)

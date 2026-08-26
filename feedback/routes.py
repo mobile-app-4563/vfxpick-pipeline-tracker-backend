@@ -7,6 +7,7 @@ When status changes, concerned teams are notified.
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from common.audit import write_activity_log
 from common.constants import BROAD_ACCESS_ROLES, DEPARTMENTS, SHOT_STATUSES
 from common.db_utils import create_notification, get_user, run_query
 from common.http import failure, success
@@ -155,6 +156,20 @@ def update_feedback(current_user_id, shot_id):
 
     params.append(shot_id)
     run_query(f"UPDATE shots SET {', '.join(sets)} WHERE shot_id = %s", tuple(params))
+
+    changes = {}
+    if new_status is not None:
+        changes["status"] = new_status
+    if "clientFeedback" in data:
+        changes["clientFeedback"] = data.get("clientFeedback")
+    write_activity_log(
+        current_user_id,
+        "Feedback",
+        "UPDATE",
+        "Client Feedback",
+        shot_id,
+        changes,
+    )
 
     if status_changed:
         actor_name = user["name"] if user else "A team member"

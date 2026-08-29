@@ -11,6 +11,7 @@ import re
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from access.routes import delete_enabled_for_user
 from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
 from common.audit import write_activity_log
 from common.db_utils import (
@@ -603,10 +604,14 @@ def bulk_upsert_production_grid(current_user_id):
 @production_bp.route("/grid/<grid_id>", methods=["DELETE"])
 @token_required
 def delete_production_grid_row(current_user_id, grid_id):
-    """Delete a single production-grid row by its grid_id (Admin only)."""
+    """Delete a single production-grid row by its grid_id. Allowed for
+    users who can access the grid AND whose department has delete enabled
+    (per-department switch from the Access Provider page)."""
     user = get_user(current_user_id)
-    if not user or user["role"] != "Admin":
-        return failure("Access denied: Admin role required", 403)
+    if not delete_enabled_for_user(user):
+        return failure(
+            "Access denied: delete is disabled for your department", 403
+        )
 
     try:
         run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
@@ -634,8 +639,10 @@ def bulk_delete_production_grid(current_user_id):
     rows are grid_ids that do not exist in the table.
     """
     user = get_user(current_user_id)
-    if not user or user["role"] != "Admin":
-        return failure("Access denied: Admin role required", 403)
+    if not delete_enabled_for_user(user):
+        return failure(
+            "Access denied: delete is disabled for your department", 403
+        )
 
     data = request.get_json(silent=True) or {}
     grid_ids = data.get("gridIds") or []

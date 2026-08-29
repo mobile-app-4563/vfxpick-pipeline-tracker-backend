@@ -19,6 +19,7 @@ from common.constants import (
 from common.audit import write_activity_log
 from common.db_utils import generate_prefixed_id, get_user, initials, run_query
 from common.http import failure, success
+from access.routes import delete_enabled_for_user
 
 teams_bp = Blueprint("teams", __name__)
 
@@ -183,10 +184,13 @@ def add_member(current_user_id):
 @teams_bp.route("/<user_id>", methods=["DELETE"])
 @token_required
 def remove_member(current_user_id, user_id):
-    """Remove a team member. Restricted to broad-access roles."""
+    """Remove a team member. Gated by the per-department delete switch
+    (Access Provider page); broad-access roles are no longer required."""
     actor = get_user(current_user_id)
-    if not actor or actor["role"] not in BROAD_ACCESS_ROLES:
-        return failure("You are not allowed to remove team members.", 403)
+    if not delete_enabled_for_user(actor):
+        return failure(
+            "Access denied: delete is disabled for your department", 403
+        )
     if user_id == current_user_id:
         return failure("You cannot remove your own account.", 400)
 

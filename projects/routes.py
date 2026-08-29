@@ -14,6 +14,7 @@ import bcrypt
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from access.routes import delete_enabled_for_user
 from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
@@ -630,8 +631,13 @@ def delete_shot(current_user_id, shot_id):
     existing = run_query("SELECT department FROM shots WHERE shot_id = %s", (shot_id,), fetch_one=True)
     if not existing:
         return failure("Shot not found", 404)
-    if not _can_access(get_user(current_user_id), existing["department"]):
+    user = get_user(current_user_id)
+    if not _can_access(user, existing["department"]):
         return failure("You are not allowed to modify this department.", 403)
+    if not delete_enabled_for_user(user):
+        return failure(
+            "Access denied: delete is disabled for your department.", 403
+        )
 
     run_query("DELETE FROM shots WHERE shot_id = %s", (shot_id,))
     write_activity_log(
@@ -660,6 +666,10 @@ def bulk_delete_shots(current_user_id):
         return failure("shotIds (list) is required.", 400)
 
     user = get_user(current_user_id)
+    if not delete_enabled_for_user(user):
+        return failure(
+            "Access denied: delete is disabled for your department.", 403
+        )
     deleted = 0
     skipped = 0
     cnx = get_db()

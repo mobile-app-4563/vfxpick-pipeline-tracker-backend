@@ -4,6 +4,7 @@ from common.audit import write_activity_log
 from common.db_utils import get_user, run_query
 from common.http import failure, success
 from common.constants import BROAD_ACCESS_ROLES
+from access.routes import delete_enabled_for_user
 
 inventory_bp = Blueprint("inventory", __name__)
 
@@ -179,9 +180,11 @@ def update_item(current_user_id, item_id):
 @token_required
 def delete_item(current_user_id, item_id):
     user = get_user(current_user_id)
-    if not _is_authorized(user):
-        return failure("Only Admin, Production, or Management can delete inventory.", 403)
-        
+    if not delete_enabled_for_user(user):
+        return failure(
+            "Access denied: delete is disabled for your department", 403
+        )
+
     _ensure_table()
     run_query("DELETE FROM inventory WHERE id = %s", (item_id,))
     write_activity_log(

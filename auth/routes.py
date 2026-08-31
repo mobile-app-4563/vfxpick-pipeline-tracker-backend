@@ -208,6 +208,45 @@ def add_department(current_user_id):
     return success({"department": department}, 201)
 
 
+@auth_bp.route("/roles", methods=["POST"])
+@token_required
+def add_role(current_user_id):
+    """Create a new role in the registration / access options.
+
+    Restricted to broad-access roles (Admin / Production / Management).
+    The role is added to the ``role`` option category so it shows up in the
+    registration dropdown and the Access Provider matrix.  The cached
+    ``/auth/options`` response is busted so the new role is picked up
+    immediately.
+    """
+    user = get_user(current_user_id)
+    if not user or user["role"] not in BROAD_ACCESS_ROLES:
+        return failure("You are not allowed to add roles.", 403)
+
+    data = request.get_json(silent=True) or {}
+    role = (data.get("role") or data.get("name") or "").strip()
+    if not role:
+        return failure("role is required.", 400)
+
+    upsert_option(ROLE_CATEGORY, role)
+
+    # Bust the /auth/options cache so all screens see the new role without
+    # waiting out the 5-minute TTL.
+    from common.cache_instance import cache
+
+    cache.delete("app_options")
+    write_activity_log(
+        current_user_id,
+        "Auth",
+        "CREATE",
+        "Role",
+        role,
+        {},
+    )
+
+    return success({"role": role}, 201)
+
+
 @auth_bp.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}

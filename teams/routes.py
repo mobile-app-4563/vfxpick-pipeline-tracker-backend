@@ -9,6 +9,7 @@ from flask import Blueprint, request
 import bcrypt
 
 from auth.middleware import token_required
+from access.routes import menu_granted_for_user
 from common.constants import (
     ARTIST_LEVELS,
     BROAD_ACCESS_ROLES,
@@ -76,7 +77,11 @@ def teams(current_user_id):
     user = get_user(current_user_id)
     requested_department = (request.args.get("department") or "").strip() or None
     restricted_department = None
-    if user and user["role"] not in BROAD_ACCESS_ROLES:
+    if (
+        user
+        and user["role"] not in BROAD_ACCESS_ROLES
+        and not menu_granted_for_user(user, "/teams")
+    ):
         restricted_department = user.get("department")
         if requested_department and requested_department != restricted_department:
             return failure("You are not allowed to view this department.", 403)

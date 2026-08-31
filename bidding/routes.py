@@ -7,6 +7,7 @@ Tracks bidding workflow: pending → approved → rejected.
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from access.routes import menu_granted_for_user
 from common.audit import write_activity_log
 from common.db_utils import get_user, run_query
 from common.http import failure, success
@@ -22,6 +23,10 @@ def _can_access(user, department):
     if not user:
         return False
     if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    # Users granted the Bidding menu in the Access Provider matrix may work
+    # with any department, same as broad-access roles.
+    if menu_granted_for_user(user, "/bidding"):
         return True
     depts = [d.strip() for d in (department or "").split(",") if d.strip()]
     return user["department"] in depts
@@ -61,9 +66,9 @@ def list_pending_bids(current_user_id):
         params.extend(dept_parts)
     else:
         # If no department specified, restrict to accessible departments
-        from common.constants import BROAD_ACCESS_ROLES, DEPARTMENTS
+        from common.constants import BROAD_ACCESS_ROLES
 
-        if user["role"] not in BROAD_ACCESS_ROLES:
+        if user["role"] not in BROAD_ACCESS_ROLES and not menu_granted_for_user(user, "/bidding"):
             query += " AND FIND_IN_SET(%s, s.department)"
             params.append(user["department"])
 

@@ -14,7 +14,7 @@ import bcrypt
 from flask import Blueprint, request
 
 from auth.middleware import token_required
-from access.routes import delete_enabled_for_user
+from access.routes import delete_enabled_for_user, menu_granted_for_user
 from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
@@ -36,6 +36,10 @@ def _accessible_departments(user):
     if not user:
         return []
     if user["role"] in BROAD_ACCESS_ROLES:
+        return effective_pipeline_departments()
+    # A user granted the Projects menu in the Access Provider matrix may
+    # browse every department, same as broad-access roles.
+    if menu_granted_for_user(user, "/projects"):
         return effective_pipeline_departments()
     # Runtime-added departments are tracked in the options store; a
     # non-broad user sees their own department even if it was added at
@@ -276,7 +280,10 @@ def list_clients(_current_user_id):
 def create_client(current_user_id):
     """Create a new client. Restricted to broad-access roles."""
     user = get_user(current_user_id)
-    if not user or user["role"] not in BROAD_ACCESS_ROLES:
+    if not user or (
+        user["role"] not in BROAD_ACCESS_ROLES
+        and not menu_granted_for_user(user, "/projects")
+    ):
         return failure("You are not allowed to create clients.", 403)
 
     data = request.get_json(silent=True) or {}
@@ -320,7 +327,10 @@ def shows_for_client(_current_user_id, client_id):
 def create_show(current_user_id, client_id):
     """Create a new show under a client. Restricted to broad-access roles."""
     user = get_user(current_user_id)
-    if not user or user["role"] not in BROAD_ACCESS_ROLES:
+    if not user or (
+        user["role"] not in BROAD_ACCESS_ROLES
+        and not menu_granted_for_user(user, "/projects")
+    ):
         return failure("You are not allowed to create shows.", 403)
 
     client = run_query(

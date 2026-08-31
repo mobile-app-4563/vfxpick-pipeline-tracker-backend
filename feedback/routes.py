@@ -7,10 +7,12 @@ When status changes, concerned teams are notified.
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from access.routes import menu_granted_for_user
 from common.audit import write_activity_log
-from common.constants import BROAD_ACCESS_ROLES, DEPARTMENTS, SHOT_STATUSES
+from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
 from common.db_utils import create_notification, get_user, run_query
 from common.http import failure, success
+from common.options_store import effective_pipeline_departments
 from common.serializers import SHOT_SELECT, shot_to_json
 
 feedback_bp = Blueprint("feedback", __name__)
@@ -20,14 +22,20 @@ def _accessible_departments(user):
     if not user:
         return []
     if user["role"] in BROAD_ACCESS_ROLES:
-        return DEPARTMENTS
-    return [user["department"]] if user["department"] in DEPARTMENTS else []
+        return effective_pipeline_departments()
+    # Users granted the Feedback menu in the Access Provider matrix may view
+    # every department, same as broad-access roles.
+    if menu_granted_for_user(user, "/feedback"):
+        return effective_pipeline_departments()
+    return [user["department"]] if user["department"] in effective_pipeline_departments() else []
 
 
 def _can_access(user, department):
     if not user:
         return False
     if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    if menu_granted_for_user(user, "/feedback"):
         return True
     # department may be a comma-separated list (multi-department shot).
     depts = [d.strip() for d in (department or "").split(",") if d.strip()]

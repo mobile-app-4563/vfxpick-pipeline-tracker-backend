@@ -344,6 +344,62 @@ def delete_enabled_for_user(user):
     return _get_delete_enabled(department=department or None)
 
 
+def menu_granted_for_user(user, route):
+    """True when the access matrix grants [route] to the user.
+
+    Mirrors the frontend AccessProvider: the user's effective menus are the
+    INTERSECTION of their role's menu rows and their department's menu rows.
+    Roles or departments with NO configured rows default to EVERY menu (so
+    brand-new roles/departments are never locked out), and Admin is always
+    granted.  Used by data endpoints (e.g. production) so that "giving all
+    permissions" in the Access Provider screen actually opens the screens the
+    admin granted — not just the sidebar entries.
+    """
+    if not user:
+        return False
+    role = (user.get("role") or "").strip()
+    department = (user.get("department") or "").strip()
+    canonical = _canonical_route(route)
+
+    if _is_admin(user):
+        return True
+
+    try:
+        role_rows = run_query(
+            "SELECT route FROM role_menu_permissions "
+            "WHERE role = %s AND is_allowed = 1",
+            (role,),
+            fetch_all=True,
+        ) or []
+        role_routes = {
+            (_canonical_route(r.get("route")) or "").strip()
+            for r in role_rows
+        } - {""}
+        if not role_routes:
+            role_routes = set(ORDERED_MENU_ROUTES)
+        if canonical not in role_routes:
+            return False
+
+        if department:
+            dept_rows = run_query(
+                "SELECT route FROM department_menu_permissions "
+                "WHERE department = %s AND is_allowed = 1",
+                (department,),
+                fetch_all=True,
+            ) or []
+            dept_routes = {
+                (_canonical_route(r.get("route")) or "").strip()
+                for r in dept_rows
+            } - {""}
+            if dept_routes and canonical not in dept_routes:
+                return False
+        return True
+    except Exception:
+        # Tables missing/unavailable → deny so the legacy role/department
+        # gate in the caller still decides.
+        return False
+
+
 def _is_admin(user):
     role = (user or {}).get("role")
     return isinstance(role, str) and role.strip().lower() == "admin"

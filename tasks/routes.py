@@ -12,15 +12,16 @@ Implements the workflow features:
 from flask import Blueprint, request
 
 from auth.middleware import token_required
+from access.routes import menu_granted_for_user
 from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
     BROAD_ACCESS_ROLES,
-    DEPARTMENTS,
     SUPERVISOR_STATUSES,
 )
 from common.db_utils import create_notification, get_user, run_query
 from common.http import failure, success
+from common.options_store import effective_pipeline_departments
 from common.serializers import SHOT_SELECT, shot_to_json
 
 tasks_bp = Blueprint("tasks", __name__)
@@ -30,6 +31,10 @@ def _can_access(user, department):
     if not user:
         return False
     if user["role"] in BROAD_ACCESS_ROLES:
+        return True
+    # Users granted the Tasks menu in the Access Provider matrix may work
+    # with any department, same as broad-access roles.
+    if menu_granted_for_user(user, "/tasks"):
         return True
     # department may be a comma-separated list (multi-department shot).
     depts = [d.strip() for d in (department or "").split(",") if d.strip()]
@@ -69,6 +74,8 @@ def department_view(current_user_id):
 
     department = request.args.get("department")
     broad = user["role"] in BROAD_ACCESS_ROLES
+    matrix_granted = menu_granted_for_user(user, "/tasks")
+    pipeline_departments = effective_pipeline_departments()
 
     if department:
         if not _can_access(user, department):
@@ -84,17 +91,17 @@ def department_view(current_user_id):
         ) or []
         return success({"shots": [shot_to_json(r) for r in rows]})
 
-    if broad:
-        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(DEPARTMENTS))
+    if broad or matrix_granted:
+        dept_clause = " OR ".join(["FIND_IN_SET(%s, s.department)"] * len(pipeline_departments))
         rows = run_query(
             SHOT_SELECT
             + f" WHERE ({dept_clause}) ORDER BY s.allocated_date DESC, s.shot_code",
-            tuple(DEPARTMENTS),
+            tuple(pipeline_departments),
             fetch_all=True,
         ) or []
         return success({"shots": [shot_to_json(r) for r in rows]})
 
-    if user["department"] not in DEPARTMENTS:
+    if user["department"] not in pipeline_departments:
         return failure("You do not have access to any pipeline department.", 403)
 
     rows = run_query(

@@ -11,7 +11,7 @@ import re
 from flask import Blueprint, request
 
 from auth.middleware import token_required
-from access.routes import delete_enabled_for_user
+from access.routes import delete_enabled_for_user, menu_granted_for_user
 from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
 from common.audit import write_activity_log
 from common.db_utils import (
@@ -693,14 +693,19 @@ def _accessible_roles(user):
         return False
     if user["role"] in BROAD_ACCESS_ROLES or user["department"] == "Production":
         return True
-    return False
+    # Access Provider matrix: a user whose role AND department have the
+    # production-management menu enabled can view production data too, so
+    # "giving all permissions" actually opens the screens it grants.
+    return menu_granted_for_user(user, "/production-management")
 
 
 def _can_edit_concern(user):
     """Return True if user can edit production concerns."""
     if not user:
         return False
-    return user["role"] in BROAD_ACCESS_ROLES or user["department"] == "Production"
+    if user["role"] in BROAD_ACCESS_ROLES or user["department"] == "Production":
+        return True
+    return menu_granted_for_user(user, "/production-management")
 
 
 def _production_to_json(row):

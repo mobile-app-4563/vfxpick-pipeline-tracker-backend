@@ -279,12 +279,13 @@ def today_pickouts(_current_user_id):
         + """
     WHERE DATE(s.allocated_date) = %s
        OR DATE(s.due_date) = %s
-    ORDER BY s.due_date ASC, s.department, 
+       OR DATE(s.client_eta) = %s
+    ORDER BY COALESCE(s.due_date, s.client_eta) ASC, s.department, 
              CASE WHEN s.supervisor_bid = 0 THEN 0 ELSE 1 END ASC
     """
     )
 
-    rows = run_query(query, (today, today), fetch_all=True) or []
+    rows = run_query(query, (today, today, today), fetch_all=True) or []
     result = {"pickouts": [shot_to_json(r) for r in rows]}
     response = success(result)
     cache.set(cache_key, response, timeout=120)

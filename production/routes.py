@@ -5,7 +5,7 @@ Tracks concerns distinct from the actual shot data.
 Includes role-based access control.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import re
 
 from flask import Blueprint, request
@@ -142,6 +142,44 @@ def get_production_grid(current_user_id):
         return success({"rows": grid, "total": len(grid)})
     except Exception as e:
         return failure(f"Failed to fetch production grid: {e}", 500)
+
+
+@production_bp.route("/pickouts", methods=["GET"])
+@token_required
+def production_grid_pickouts(current_user_id):
+    """Production-grid rows whose ETA falls today or tomorrow (Home pickouts).
+
+    The Home page's "Production Pickouts" list is sourced from the imported
+    Jan-Dec working file (production_grid), exactly like the Project Pickouts
+    list is sourced from the shots table. Only rows with eta == today or
+    eta == tomorrow are returned, ordered by ETA then show/shot.
+    """
+    user = get_user(current_user_id)
+    if not _accessible_roles(user):
+        return failure("Access denied", 403)
+
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    try:
+        rows = run_query(
+            """
+            SELECT grid_id, coordinator, month, shots_received_date,
+                   client_for_ref, client_name, show_name, wip_eta, eta,
+                   shot_code, frames, tasks, review_notes, status,
+                   delivered_on, work_station, shot_mandays,
+                   approved_client_md, fl_eta, fl_mandays, created_at
+            FROM production_grid
+            WHERE eta IN (%s, %s)
+            ORDER BY eta ASC, show_name ASC, shot_code ASC
+            """,
+            (today, tomorrow),
+            fetch_all=True,
+        )
+        pickouts = [_grid_to_json(row, idx + 1) for idx, row in enumerate(rows)]
+        return success({"pickouts": pickouts, "total": len(pickouts)})
+    except Exception as e:
+        return failure(f"Failed to fetch production pickouts: {e}", 500)
 
 
 @production_bp.route("/grid/sync", methods=["POST"])

@@ -33,17 +33,22 @@ def home_summary(_current_user_id):
         if cached is not None:
             return cached
 
-    today = date.today().isoformat()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    # Imported grid dates often carry meaningless years (Excel month/year
+    # cells decode to old years like 2009/2011), so ETA is matched on
+    # MONTH+DAY only and the stored year is ignored.
+    today_md = date.today().strftime("%m-%d")
+    tomorrow_md = (date.today() + timedelta(days=1)).strftime("%m-%d")
 
     counts = run_query(
         """
         SELECT
-            SUM(CASE WHEN eta = %s THEN 1 ELSE 0 END) AS today_pickouts,
-            SUM(CASE WHEN eta = %s THEN 1 ELSE 0 END) AS tomorrow_pickouts
+            SUM(CASE WHEN DATE_FORMAT(eta, '%m-%d') = %s THEN 1 ELSE 0 END)
+                AS today_pickouts,
+            SUM(CASE WHEN DATE_FORMAT(eta, '%m-%d') = %s THEN 1 ELSE 0 END)
+                AS tomorrow_pickouts
         FROM production_grid
         """,
-        (today, tomorrow),
+        (today_md, tomorrow_md),
         fetch_one=True,
     ) or {}
 
@@ -257,6 +262,10 @@ def show_shots(_current_user_id, show_id):
 def today_pickouts(_current_user_id):
     """Today's pickouts prioritized by urgency: due_date, department, pending bids.
 
+    Shots are matched on MONTH+DAY only (the stored year of imported Excel
+    dates is meaningless and ignored), so a shot dated 2022-09-09 still
+    counts as a pickout for 2026-09-09.
+
     Cached for 2 minutes per date. Pass ?refresh=1 to bypass.
     """
     date_param = (request.args.get("date") or "").strip()
@@ -274,18 +283,22 @@ def today_pickouts(_current_user_id):
         if cached is not None:
             return cached
 
+    # Match month+day only so the year stored in the shot (often garbage from
+    # Excel month/year cells) never hides a shot that is due today/tomorrow.
+    month_day = today[5:]  # ISO "YYYY-MM-DD" -> "MM-DD"
+
     query = (
         SHOT_SELECT
         + """
-    WHERE DATE(s.allocated_date) = %s
-       OR DATE(s.due_date) = %s
-       OR DATE(s.client_eta) = %s
+    WHERE DATE_FORMAT(s.allocated_date, '%m-%d') = %s
+       OR DATE_FORMAT(s.due_date, '%m-%d') = %s
+       OR DATE_FORMAT(s.client_eta, '%m-%d') = %s
     ORDER BY COALESCE(s.due_date, s.client_eta) ASC, s.department, 
              CASE WHEN s.supervisor_bid = 0 THEN 0 ELSE 1 END ASC
     """
     )
 
-    rows = run_query(query, (today, today, today), fetch_all=True) or []
+    rows = run_query(query, (month_day, month_day, month_day), fetch_all=True) or []
     result = {"pickouts": [shot_to_json(r) for r in rows]}
     response = success(result)
     cache.set(cache_key, response, timeout=120)

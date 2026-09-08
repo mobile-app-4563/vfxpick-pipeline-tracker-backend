@@ -151,15 +151,16 @@ def production_grid_pickouts(current_user_id):
 
     The Home page's "Production Pickouts" list is sourced from the imported
     Jan-Dec working file (production_grid), exactly like the Project Pickouts
-    list is sourced from the shots table. Only rows with eta == today or
-    eta == tomorrow are returned, ordered by ETA then show/shot.
+    list is sourced from the shots table. Only rows whose ETA month/day
+    equals today or tomorrow are returned (the stored year of imported Excel
+    dates is meaningless and ignored), ordered by ETA then show/shot.
     """
     user = get_user(current_user_id)
     if not _accessible_roles(user):
         return failure("Access denied", 403)
 
-    today = date.today().isoformat()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    today_md = date.today().strftime("%m-%d")
+    tomorrow_md = (date.today() + timedelta(days=1)).strftime("%m-%d")
 
     try:
         rows = run_query(
@@ -170,10 +171,11 @@ def production_grid_pickouts(current_user_id):
                    delivered_on, work_station, shot_mandays,
                    approved_client_md, fl_eta, fl_mandays, created_at
             FROM production_grid
-            WHERE eta IN (%s, %s)
-            ORDER BY eta ASC, show_name ASC, shot_code ASC
+            WHERE DATE_FORMAT(eta, '%m-%d') IN (%s, %s)
+            ORDER BY DATE_FORMAT(eta, '%m-%d') ASC, show_name ASC,
+                     shot_code ASC
             """,
-            (today, tomorrow),
+            (today_md, tomorrow_md),
             fetch_all=True,
         )
         pickouts = [_grid_to_json(row, idx + 1) for idx, row in enumerate(rows)]

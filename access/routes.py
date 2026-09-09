@@ -344,6 +344,87 @@ def delete_enabled_for_user(user):
     return _get_delete_enabled(department=department or None)
 
 
+# ─── Per-department IMPORT switch (mirrors the delete switch above) ──────────
+# Admin toggles Import File / Paste CSV / create actions per department from
+# the Access Provider screen. Unconfigured departments default to ENABLED so
+# nobody regresses until an Admin explicitly turns the switch off.
+
+_IMPORT_ENABLED_KEY = "import_options_enabled"
+_IMPORT_DEPT_PREFIX = "import_enabled_"
+
+
+def _dept_import_key(department):
+    """Settings key for one department's import switch (case-insensitive)."""
+    return f"{_IMPORT_DEPT_PREFIX}{(department or '').strip().upper()}"
+
+
+def _get_import_enabled(department=None):
+    """Import switch, optionally per department.
+
+    With a department, the per-department switch wins (falling back to the
+    global value when that department has no explicit row yet). Without a
+    department, returns the global value. Anything except "0" counts as
+    enabled (unconfigured = enabled).
+    """
+    try:
+        _ensure_settings_table()
+        if department and (department or "").strip():
+            rows = run_query(
+                "SELECT setting_value FROM app_settings WHERE setting_key = %s",
+                (_dept_import_key(department),),
+                fetch_all=True,
+            )
+            if rows:
+                return rows[0].get("setting_value") != "0"
+        rows = run_query(
+            "SELECT setting_value FROM app_settings WHERE setting_key = %s",
+            (_IMPORT_ENABLED_KEY,),
+            fetch_all=True,
+        )
+        if rows and rows[0].get("setting_value") == "0":
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _department_import_map():
+    """{department: bool} for every known department."""
+    return {
+        dept: _get_import_enabled(department=dept)
+        for dept in _known_departments()
+    }
+
+
+def _set_import_enabled(user_id, enabled, department=None):
+    _ensure_settings_table()
+    if department and (department or "").strip():
+        key = _dept_import_key(department)
+    else:
+        key = _IMPORT_ENABLED_KEY
+    run_query(
+        """
+        INSERT INTO app_settings (setting_key, setting_value, updated_by_user_id)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            setting_value = VALUES(setting_value),
+            updated_by_user_id = VALUES(updated_by_user_id)
+        """,
+        (key, "1" if enabled else "0", user_id),
+    )
+
+
+def import_enabled_for_user(user):
+    """True when the user's own department has import enabled. Used by the
+    create/import endpoints so the per-department switch is enforced
+    server-side too. Falls back to the global switch for users without a
+    department."""
+    if not user:
+        return False
+    department = (user.get("department") or "").strip()
+    return _get_import_enabled(department=department or None)
+
+
 def menu_granted_for_user(user, route):
     """True when the access matrix grants [route] to the user.
 
@@ -851,6 +932,8 @@ def get_permissions(current_user_id):
         "roles": sorted(mapping.keys()),
         "deleteEnabled": _get_delete_enabled(),
         "departments": _department_delete_map(),
+        "importEnabled": _get_import_enabled(),
+        "importDepartments": _department_import_map(),
         "departmentMenus": _fetch_department_menu_permissions(),
     }
     user = get_user(current_user_id)
@@ -905,6 +988,10 @@ def update_permissions(current_user_id):
             "changedCount": len(changes),
             "departmentMenus": dept_normalized
             or _fetch_department_menu_permissions(),
+            "deleteEnabled": _get_delete_enabled(),
+            "departments": _department_delete_map(),
+            "importEnabled": _get_import_enabled(),
+            "importDepartments": _department_import_map(),
             "logs": logs,
         }
     )
@@ -913,13 +1000,15 @@ def update_permissions(current_user_id):
 @access_bp.route("/settings", methods=["GET"])
 @token_required
 def get_access_settings(current_user_id):
-    """Read access feature flags: the legacy global delete kill-switch plus
-    the per-department delete map."""
+    """Read access feature flags: the global + per-department delete kill
+    switch and the global + per-department import switch."""
     _ensure_settings_table()
     return success(
         {
             "deleteEnabled": _get_delete_enabled(),
             "departments": _department_delete_map(),
+            "importEnabled": _get_import_enabled(),
+            "importDepartments": _department_import_map(),
         }
     )
 
@@ -933,16 +1022,32 @@ def update_access_settings(current_user_id):
 
     _ensure_settings_table()
     data = request.get_json(silent=True) or {}
-    raw = data.get("deleteEnabled")
-    if not isinstance(raw, bool):
+
+    # Both feature families live on this endpoint. Each is OPTIONAL and only
+    # validated when present, so the Delete dialog and the Import dialog never
+    # clobber each other (the admin toggles one switch at a time).
+    raw_delete = data.get("deleteEnabled")
+    raw_import = data.get("importEnabled")
+    if raw_delete is None and raw_import is None:
+        return failure(
+            "Provide 'deleteEnabled' and/or 'importEnabled' as a boolean.", 400
+        )
+    if raw_delete is not None and not isinstance(raw_delete, bool):
         return failure("'deleteEnabled' must be a boolean.", 400)
+    if raw_import is not None and not isinstance(raw_import, bool):
+        return failure("'importEnabled' must be a boolean.", 400)
 
     department = (data.get("department") or "").strip() or None
-    _set_delete_enabled(current_user_id, raw, department=department)
+    if raw_delete is not None:
+        _set_delete_enabled(current_user_id, raw_delete, department=department)
+    if raw_import is not None:
+        _set_import_enabled(current_user_id, raw_import, department=department)
     return success(
         {
             "deleteEnabled": _get_delete_enabled(),
             "departments": _department_delete_map(),
+            "importEnabled": _get_import_enabled(),
+            "importDepartments": _department_import_map(),
         }
     )
 
@@ -976,6 +1081,10 @@ def reset_permissions(current_user_id):
             "changes": changes,
             "changedCount": len(changes),
             "departmentMenus": dept_defaults,
+            "deleteEnabled": _get_delete_enabled(),
+            "departments": _department_delete_map(),
+            "importEnabled": _get_import_enabled(),
+            "importDepartments": _department_import_map(),
             "logs": logs,
         }
     )

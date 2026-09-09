@@ -11,7 +11,11 @@ import re
 from flask import Blueprint, request
 
 from auth.middleware import token_required
-from access.routes import delete_enabled_for_user, menu_granted_for_user
+from access.routes import (
+    delete_enabled_for_user,
+    import_enabled_for_user,
+    menu_granted_for_user,
+)
 from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
 from common.audit import write_activity_log
 from common.db_utils import (
@@ -379,6 +383,8 @@ def create_production_grid_row(current_user_id):
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
         return failure("Access denied", 403)
+    if not import_enabled_for_user(user):
+        return failure("Access denied: import is disabled for your department", 403)
 
     data = request.get_json(silent=True) or {}
     client_name = _grid_null(data.get("client")) or ""
@@ -489,6 +495,8 @@ def bulk_upsert_production_grid(current_user_id):
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
         return failure("Access denied", 403)
+    if not import_enabled_for_user(user):
+        return failure("Access denied: import is disabled for your department", 403)
 
     data = request.get_json(silent=True) or {}
     rows = data.get("rows") or []

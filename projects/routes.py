@@ -14,7 +14,11 @@ import bcrypt
 from flask import Blueprint, request
 
 from auth.middleware import token_required
-from access.routes import delete_enabled_for_user, menu_granted_for_user
+from access.routes import (
+    delete_enabled_for_user,
+    import_enabled_for_user,
+    menu_granted_for_user,
+)
 from common.audit import write_activity_log
 from common.constants import (
     ARTIST_STATUSES,
@@ -461,6 +465,8 @@ def create_shot(current_user_id):
     department = ",".join(dept_parts)
     if not _can_access(user, department):
         return failure("You are not allowed to create shots in this department.", 403)
+    if not import_enabled_for_user(user):
+        return failure("Access denied: import is disabled for your department.", 403)
 
     show = run_query("SELECT show_id FROM shows WHERE show_id = %s", (show_id,), fetch_one=True)
     if not show:
@@ -732,6 +738,10 @@ def bulk_upsert_shots(current_user_id):
     together or all are rolled back.  Uses one connection for the entire
     operation to avoid pool exhaustion.
     """
+    user = get_user(current_user_id)
+    if not import_enabled_for_user(user):
+        return failure("Access denied: import is disabled for your department.", 403)
+
     data = request.get_json(silent=True) or {}
     rows = data.get("rows") or []
     if not isinstance(rows, list) or not rows:

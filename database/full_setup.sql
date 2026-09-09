@@ -26,6 +26,8 @@ SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS attachments;
 DROP TABLE IF EXISTS chat_messages;
 DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS department_menu_permissions;
+DROP TABLE IF EXISTS department_menu_permission_audit;
 DROP TABLE IF EXISTS role_menu_permissions;
 DROP TABLE IF EXISTS role_menu_permission_audit;
 DROP TABLE IF EXISTS activity_audit_log;
@@ -249,6 +251,41 @@ CREATE TABLE role_menu_permission_audit (
     INDEX idx_audit_changed_at (changed_at DESC),
     INDEX idx_audit_actor (changed_by_user_id),
     INDEX idx_audit_role_route (role, route)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- TABLE 10b: department_menu_permissions (Access Provider persistence)
+-- Effective menus = role menus INTERSECT department menus, so both
+-- permission sets are stored and enforced together.
+-- ============================================================
+CREATE TABLE department_menu_permissions (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    department      VARCHAR(50)     NOT NULL,
+    route           VARCHAR(100)    NOT NULL,
+    is_allowed      BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uk_department_route (department, route),
+    INDEX idx_dept_allowed (department, is_allowed)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- TABLE 10c: department_menu_permission_audit (department permission change history)
+-- ============================================================
+CREATE TABLE department_menu_permission_audit (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    changed_by_user_id  VARCHAR(20)     NOT NULL,
+    action              VARCHAR(30)     NOT NULL,      -- update | reset
+    department          VARCHAR(50)     NOT NULL,
+    route               VARCHAR(100)    NOT NULL,
+    old_allowed         BOOLEAN         NOT NULL,
+    new_allowed         BOOLEAN         NOT NULL,
+    changed_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_audit_changed_at (changed_at DESC),
+    INDEX idx_audit_actor (changed_by_user_id),
+    INDEX idx_audit_dept_route (department, route)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================

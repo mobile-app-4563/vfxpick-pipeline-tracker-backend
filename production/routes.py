@@ -54,41 +54,21 @@ GRID_FIELDS = {
 }
 
 
-def _show_family(row):
-    """Group key used to keep packages of the same show together.
-
-    Package names often carry a numeric suffix (e.g. "Princess Cruises_1",
-    "Princess Cruises_2"); the suffix is stripped so those packages land in
-    the same group. Falls back to the client name when no show is set.
-    """
-    show = (row.get("show_name") or "").strip()
-    family = re.sub(r"_\d+$", "", show).strip()
-    if family:
-        return family
-    client = (row.get("client_name") or "").strip()
-    return client or show
-
-
 def _order_grid_rows(rows):
-    """Sort grid rows so packages of the same show are grouped together.
+    """Show upcoming ETAs first, nearest due date first; missing dates last."""
+    today = date.today()
 
-    Show groups are ordered newest-first (by the newest row in the group);
-    rows within a group keep their arrival order.
-    """
-    groups = {}
-    for row in rows:
-        groups.setdefault(_show_family(row), []).append(row)
+    def _eta_order(row):
+        eta = row.get("eta")
+        if isinstance(eta, datetime):
+            eta = eta.date()
+        if eta is None:
+            return (2, 0)
+        if eta >= today:
+            return (0, eta.toordinal())
+        return (1, -eta.toordinal())
 
-    def _group_newest(group):
-        stamps = [r.get("created_at") for r in group if r.get("created_at") is not None]
-        return max(stamps) if stamps else datetime.min
-
-    ordered = []
-    for _, group in sorted(
-        groups.items(), key=lambda kv: _group_newest(kv[1]), reverse=True
-    ):
-        ordered.extend(group)
-    return ordered
+    return sorted(rows, key=_eta_order)
 
 
 def _grid_to_json(row, sno):
@@ -139,8 +119,7 @@ def get_production_grid(current_user_id):
 
     try:
         rows = run_query(query, fetch_all=True)
-        # Group packages of the same show together; newest show family first,
-        # arrival order within a family (see _order_grid_rows).
+        # Upcoming ETA rows are listed first, followed by past and undated rows.
         rows = _order_grid_rows(rows)
         grid = [_grid_to_json(row, idx + 1) for idx, row in enumerate(rows)]
         return success({"rows": grid, "total": len(grid)})

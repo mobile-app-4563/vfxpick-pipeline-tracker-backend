@@ -117,6 +117,11 @@ def get_production_grid(current_user_id):
         ORDER BY created_at ASC
     """
 
+    # Normalise any Tasks spelling stored before the mapping existed, so the
+    # Department filter can match the rows already in the table. Runs at most
+    # once per process (see _ensure_grid_tasks_normalized).
+    _ensure_grid_tasks_normalized()
+
     try:
         rows = run_query(query, fetch_all=True)
         # Upcoming ETA rows are listed first, followed by past and undated rows.
@@ -304,6 +309,239 @@ def _grid_status(value):
     return status if status in SHOT_STATUSES else "Awaiting Approval"
 
 
+# ─── Tasks -> pipeline department mapping ────────────────────────────────────
+# Real spreadsheets spell the same work many ways: CAMERA TRACK / OBJECT TRACK
+# / TRACKING are all matchmove, ROTOANIM is rotoscoping and DMP is matte
+# painting. The grid's Department filter only knows ROTO, PAINT, MM and COMP,
+# so every value is translated on the way in.
+#
+# Matching is case-insensitive: "roto", "Roto" and "ROTO" all normalise onto
+# the same canonical department, as do "camera track" / "Camera Track" /
+# "CAMERA TRACK".
+#
+# A value that cannot be recognised is NEVER rejected — it is kept verbatim
+# (upper-cased) and the frontend offers it as an extra Department filter
+# option, so its rows stay reachable.
+GRID_DEPARTMENTS = ["ROTO", "PAINT", "MM", "COMP"]
+
+# Spreadsheet spelling -> canonical department. Mirrors
+# frontend/lib/modules/production_management/utils/grid_department_mapper.dart.
+GRID_TASK_ALIAS = {
+    # ROTO — rotoscoping and keying.
+    "ROTO": "ROTO",
+    "ROTOSCOPE": "ROTO",
+    "ROTOSCOPY": "ROTO",
+    "ROTOANIM": "ROTO",
+    "ROTOANIMATION": "ROTO",
+    "ROTO ANIM": "ROTO",
+    "ROTO ANIMATION": "ROTO",
+    "ROTOKEY": "ROTO",
+    "ROTO KEY": "ROTO",
+    "ROTO KEYING": "ROTO",
+    "KEYING": "ROTO",
+    # PAINT — cleanup, prep and matte painting.
+    "PAINT": "PAINT",
+    "PAINTING": "PAINT",
+    "DIGI PAINT": "PAINT",
+    "DIGITAL PAINT": "PAINT",
+    "PREP": "PAINT",
+    "CLEANUP": "PAINT",
+    "CLEAN UP": "PAINT",
+    "DUSTBUST": "PAINT",
+    "DUST BUST": "PAINT",
+    "WIRE REMOVAL": "PAINT",
+    "DMP": "PAINT",
+    "MATTE": "PAINT",
+    "MATTE PAINTING": "PAINT",
+    # MM — matchmove, tracking and modelling.
+    "MM": "MM",
+    "MATCHMOVE": "MM",
+    "MATCH MOVE": "MM",
+    "MATCHMOTION": "MM",
+    "MATCH MOTION": "MM",
+    "CAMERA TRACK": "MM",
+    "CAM TRACK": "MM",
+    "CAMTRACK": "MM",
+    "OBJECT TRACK": "MM",
+    "OBJ TRACK": "MM",
+    "PLANAR TRACK": "MM",
+    "PLANE TRACK": "MM",
+    "3D TRACK": "MM",
+    "MOTION TRACK": "MM",
+    "TRACKING": "MM",
+    "MODELING": "MM",
+    "MODELLING": "MM",
+    "RETOPO": "MM",
+    "RETOPOLOGY": "MM",
+    "RIGGING": "MM",
+    "UV": "MM",
+    "TEXTURE": "MM",
+    "SHADING": "MM",
+    "LOOKDEV": "MM",
+    "LOOK DEV": "MM",
+    # COMP — compositing.
+    "COMP": "COMP",
+    "COMPOSITING": "COMP",
+    "COMPOSITE": "COMP",
+    "CGI": "COMP",
+}
+
+# Separators real sheets use between two departments on one row.
+_GRID_TASK_SEPARATOR = re.compile(r"[,/&+]|\bAND\b")
+
+# Alias keys longest-first, so "ROTO ANIM" wins over "ROTO".
+_GRID_ALIAS_KEYS = sorted(GRID_TASK_ALIAS, key=len, reverse=True)
+
+
+def _match_grid_task_alias(part):
+    """Longest alias appearing as a whole word inside ``part``, else None.
+
+    Whole-word matching keeps ``ROTO ANIM`` from resolving to ``ROTO`` first
+    and stops ``COMPUTER`` / ``PAINTER`` matching ``COMP`` / ``PAINT``.
+    """
+    for key in _GRID_ALIAS_KEYS:
+        if part == key:
+            return GRID_TASK_ALIAS[key]
+        if re.search(r"(^|\s)" + re.escape(key) + r"($|\s)", part):
+            return GRID_TASK_ALIAS[key]
+    return None
+
+
+def normalize_grid_tasks(raw):
+    """Map a free-text Tasks/Department value onto the pipeline departments.
+
+    A value may name several departments (``PAINT / COMP``, ``ROTO + PAINT +
+    TRACKING``); those are split on ``,`` ``/`` ``&`` ``+`` ``AND`` and stored
+    comma-separated in pipeline order. Parts that match no known spelling are
+    kept verbatim, upper-cased and trimmed — never rejected.
+
+    Returns ``''`` for an empty/blank input.
+    """
+    # Upper-case for case-insensitive matching, and collapse repeated
+    # whitespace so "CaMeRa   TrAcK" matches the same alias as "CAMERA TRACK".
+    value = re.sub(r"\s+", " ", str(raw or "").strip().upper())
+    if not value:
+        return ""
+    parts = [p.strip() for p in _GRID_TASK_SEPARATOR.split(value) if p.strip()]
+    if not parts:
+        return value
+    mapped = []
+    for part in parts:
+        resolved = (
+            GRID_TASK_ALIAS.get(part) or _match_grid_task_alias(part) or part
+        )
+        if resolved not in mapped:
+            mapped.append(resolved)
+    ordered = [d for d in GRID_DEPARTMENTS if d in mapped]
+    ordered += sorted(m for m in mapped if m not in GRID_DEPARTMENTS)
+    # A value that already was exactly one known department is unchanged.
+    if len(ordered) == 1 and ordered[0] == value:
+        return value
+    return ", ".join(ordered)
+
+
+_GRID_TASKS_BACKFILL_DONE = False
+
+
+def _ensure_grid_tasks_normalized():
+    """One-off: rewrite ``production_grid.tasks`` into the canonical form.
+
+    Rows imported before the Tasks -> department mapping existed still hold raw
+    spreadsheet spellings (``CAMERA TRACK``, ``ROTOANIM``, ``paint / comp``),
+    which the Department filter cannot match. This also aligns the stored
+    ``tasks`` text with what new imports send, so a re-import updates those rows
+    instead of duplicating them.
+
+    Runs at most once per process — the first grid read or import after a
+    restart does the tidy-up. Values that cannot be recognised are left as they
+    are; nothing is ever deleted. Failures are swallowed so a read can never be
+    blocked by the tidy-up.
+    """
+    global _GRID_TASKS_BACKFILL_DONE
+    if _GRID_TASKS_BACKFILL_DONE:
+        return
+    # Set before the work so a transient failure cannot retry on every request.
+    _GRID_TASKS_BACKFILL_DONE = True
+
+    conn = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True, buffered=True)
+        cursor.execute(
+            "SELECT grid_id, tasks FROM production_grid "
+            "WHERE tasks IS NOT NULL AND TRIM(tasks) <> ''"
+        )
+        updates = []
+        for row in cursor.fetchall():
+            normalized = normalize_grid_tasks(row.get("tasks"))
+            if normalized and normalized != row.get("tasks"):
+                updates.append((normalized, row["grid_id"]))
+        if updates:
+            cursor.executemany(
+                "UPDATE production_grid SET tasks = %s WHERE grid_id = %s",
+                updates,
+            )
+            conn.commit()
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ─── Import row identity: source_row_ref ─────────────────────────────────────
+# An imported row is identified by
+#   (client, show, tasks, shot_code, review_notes, source_row_ref)
+# where source_row_ref is the line's row number inside the imported file.
+# The old key stopped at review_notes, which is NOT unique in real
+# spreadsheets: the same shot + department + notes legitimately appears on
+# many lines (one per element/submission), each with its own Frames, ETA,
+# Shot man-days and Status. Those lines used to be merged into one row.
+# See database/migration_012_production_grid_source_row_ref.sql for the
+# measured numbers. Hand-created rows keep source_row_ref NULL and behave
+# exactly as before.
+_GRID_SOURCE_REF_READY = False
+
+
+def _ensure_grid_source_row_ref(cursor):
+    """Add production_grid.source_row_ref on demand (idempotent).
+
+    Mirrors the create-on-demand convention used elsewhere in the backend so
+    a database that has not run migration_012 by hand still works. Runs at
+    most once per process.
+    """
+    global _GRID_SOURCE_REF_READY
+    if _GRID_SOURCE_REF_READY:
+        return
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'production_grid' "
+        "AND COLUMN_NAME = 'source_row_ref'"
+    )
+    row = cursor.fetchone()
+    if not row or int(row.get("n") or 0) == 0:
+        cursor.execute(
+            "ALTER TABLE production_grid "
+            "ADD COLUMN source_row_ref VARCHAR(80) DEFAULT NULL AFTER review_notes"
+        )
+        try:
+            cursor.execute(
+                "ALTER TABLE production_grid "
+                "ADD INDEX idx_production_grid_source_ref (source_row_ref)"
+            )
+        except Exception:
+            # The index is an optimisation only - never fail an import for it.
+            pass
+    _GRID_SOURCE_REF_READY = True
+
+
 def _next_prefixed_id(cursor, table, id_column, prefix, id_state, key):
     """Generate sequential prefixed IDs within one request/transaction.
 
@@ -355,9 +593,14 @@ def create_production_grid_row(current_user_id):
     Body: {"client": "...", "show": "...", "shotCode": "...",
            "tasks": "ROTO", ...grid fields...}
     Client/show are stored as plain names in production_grid (no dependency
-    on the shared clients/shows tables). If a row with the same
+    on the shared clients/shows tables). If a HAND-CREATED row with the same
     (client_name, show_name, tasks, shot_code, review_notes) already exists it
     is UPDATED with the incoming data instead of creating a duplicate.
+
+    Imported rows are never matched here: they carry a ``source_row_ref``
+    (the line number in the imported file) and each one is a distinct line of
+    the spreadsheet. Without this restriction a manual add could silently
+    overwrite an arbitrary imported line.
     """
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
@@ -371,12 +614,10 @@ def create_production_grid_row(current_user_id):
     shot_code = _grid_null(data.get("shotCode"))
     tasks = _grid_null(data.get("tasks")) or _grid_null(data.get("department"))
     if tasks:
-        # A grid row may cover multiple comma-separated departments.
-        tasks = ",".join(
-            part.strip().upper()
-            for part in tasks.split(",")
-            if part.strip()
-        )
+        # Any capitalisation is accepted here. Known spellings are normalised
+        # onto ROTO / PAINT / MM / COMP; an unknown value is kept as-is rather
+        # than rejected.
+        tasks = normalize_grid_tasks(tasks)
 
     if not shot_code or not tasks:
         return failure("shotCode and tasks (department) are required", 400)
@@ -389,14 +630,18 @@ def create_production_grid_row(current_user_id):
     try:
         cursor = conn.cursor(dictionary=True, buffered=True)
 
-        # Upsert: a row with the same (client, show, tasks, shot_code,
-        # review_notes) already exists → update it with the incoming data
-        # instead of duplicating it. Different feedback rounds (review notes)
-        # are treated as distinct rows.
+        # The lookup below filters on source_row_ref, so make sure the column
+        # exists even on a database that predates migration_012.
+        _ensure_grid_source_row_ref(cursor)
+
+        # Idempotency is scoped to hand-created rows only (source_row_ref IS
+        # NULL). Imported rows each own their own source_row_ref, so adding a
+        # row by hand can never overwrite one of them.
         cursor.execute(
             "SELECT grid_id FROM production_grid "
             "WHERE client_name = %s AND show_name = %s AND tasks = %s "
-            "AND shot_code = %s AND COALESCE(review_notes, '') = COALESCE(%s, '')",
+            "AND shot_code = %s AND COALESCE(review_notes, '') = COALESCE(%s, '') "
+            "AND source_row_ref IS NULL",
             (client_name, show_name, tasks, shot_code, review_notes),
         )
         existing = cursor.fetchone()
@@ -464,12 +709,20 @@ def bulk_upsert_production_grid(current_user_id):
 
     Body: {"rows": [ {grid fields + client/show names}, ... ]}
     Client/show are stored as plain names in production_grid — no dependency
-    on the shared clients/shows tables. Upserts on
-    (client_name, show_name, tasks, shot_code, review_notes) so the same shot
-    with different tasks or a different feedback round (review notes) keeps its
-    own row. Duplicate rows WITHIN the same batch also update the first
-    occurrence (never duplicated). Rows missing shotCode or an invalid
-    department are reported in ``errors``.
+    on the shared clients/shows tables.
+
+    A row is identified by
+    (client_name, show_name, tasks, shot_code, review_notes, source_row_ref),
+    where ``sourceRowRef`` is the line's row number inside the imported file
+    (e.g. "Sheet1!12"). That keeps every physical spreadsheet line as its own
+    grid row even when shot/department/notes repeat - which is the normal case,
+    since each line carries its own Frames / ETA / man-days / Status - while a
+    re-import of the SAME file updates those rows instead of duplicating them.
+    Rows sent without a ``sourceRowRef`` (manual entries) fall back to the old
+    (client, show, tasks, shot_code, review_notes) identity. Duplicate rows
+    WITHIN the same batch also update the first occurrence (never duplicated).
+    The ``tasks`` (department) value is normalised but NEVER rejected for being
+    unknown — only a missing shotCode or a blank department is an error.
     """
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
@@ -492,19 +745,23 @@ def bulk_upsert_production_grid(current_user_id):
         shot_code = _grid_null(row.get("shotCode"))
         tasks = _grid_null(row.get("tasks")) or _grid_null(row.get("department"))
         if tasks:
-            # A grid row may cover multiple comma-separated departments.
-            tasks = ",".join(
-                part.strip().upper()
-                for part in tasks.split(",")
-                if part.strip()
-            )
+            # Any capitalisation is accepted here. Known spellings are
+            # normalised onto ROTO / PAINT / MM / COMP; an unknown value is
+            # kept as-is rather than rejected.
+            tasks = normalize_grid_tasks(tasks)
         if not shot_code or not tasks:
             errors.append(f"Row {idx}: shotCode and tasks (department) are required.")
             continue
-        valid_rows.append((idx, row, shot_code, tasks))
+        source_ref = _grid_null(row.get("sourceRowRef")) or ""
+        valid_rows.append((idx, row, shot_code, tasks, source_ref))
 
     if not valid_rows:
         return success({"created": 0, "updated": 0, "errors": errors, "notes": []})
+
+    # Align pre-mapping Tasks spellings BEFORE the identity lookup below:
+    # otherwise a re-import would not match the normalised rows and would
+    # insert duplicates instead of updating them.
+    _ensure_grid_tasks_normalized()
 
     conn = get_db()
     conn.autocommit = False
@@ -515,9 +772,14 @@ def bulk_upsert_production_grid(current_user_id):
         cursor = conn.cursor(dictionary=True, buffered=True)
         id_state = {}
 
+        # Add production_grid.source_row_ref if this database predates
+        # migration_012. Runs before any write, so the implicit commit MySQL
+        # performs for DDL cannot disturb the import transaction.
+        _ensure_grid_source_row_ref(cursor)
+
         # ── Batch-fetch existing rows per (client, show, tasks) ────────────
-        # review_notes is part of the identity so each feedback round of the
-        # same shot/task is kept as its own row.
+        # review_notes and source_row_ref are part of the identity so each
+        # feedback round AND each physical file line keeps its own row.
         existing_map = {}
         unique_groups = {
             (
@@ -525,15 +787,24 @@ def bulk_upsert_production_grid(current_user_id):
                 _grid_null(row.get("show")) or "",
                 tasks,
                 _grid_null(row.get("reviewNotes")) or "",
+                source_ref,
             )
-            for idx, row, _, tasks in valid_rows
+            for idx, row, _, tasks, source_ref in valid_rows
         }
-        for client_name, show_name, tasks, review_notes in unique_groups:
+        for (
+            client_name,
+            show_name,
+            tasks,
+            review_notes,
+            source_ref,
+        ) in unique_groups:
             cursor.execute(
-                "SELECT grid_id, client_name, show_name, tasks, shot_code, review_notes "
+                "SELECT grid_id, client_name, show_name, tasks, shot_code, "
+                "review_notes, source_row_ref "
                 "FROM production_grid WHERE client_name = %s AND show_name = %s "
-                "AND tasks = %s AND COALESCE(review_notes, '') = COALESCE(%s, '')",
-                (client_name, show_name, tasks, review_notes),
+                "AND tasks = %s AND COALESCE(review_notes, '') = COALESCE(%s, '') "
+                "AND COALESCE(source_row_ref, '') = %s",
+                (client_name, show_name, tasks, review_notes, source_ref),
             )
             for r in cursor.fetchall():
                 existing_map[
@@ -543,6 +814,7 @@ def bulk_upsert_production_grid(current_user_id):
                         r["tasks"],
                         r["shot_code"],
                         r["review_notes"] or "",
+                        r["source_row_ref"] or "",
                     )
                 ] = r["grid_id"]
 
@@ -554,19 +826,26 @@ def bulk_upsert_production_grid(current_user_id):
         """
         insert_sql = f"""
             INSERT INTO production_grid
-                (grid_id, client_name, show_name, shot_code,
+                (grid_id, client_name, show_name, shot_code, source_row_ref,
                  {", ".join(GRID_INSERT_COLUMNS)})
-            VALUES (%s, %s, %s, %s, {", ".join(["%s"] * len(GRID_INSERT_COLUMNS))})
+            VALUES (%s, %s, %s, %s, %s, {", ".join(["%s"] * len(GRID_INSERT_COLUMNS))})
         """
 
-        for idx, row, shot_code, tasks in valid_rows:
+        for idx, row, shot_code, tasks, source_ref in valid_rows:
             client_name = _grid_null(row.get("client")) or ""
             show_name = _grid_null(row.get("show")) or ""
             review_notes = _grid_null(row.get("reviewNotes")) or ""
             try:
                 status = _grid_status(row.get("status"))
                 existing_grid_id = existing_map.get(
-                    (client_name, show_name, tasks, shot_code, review_notes)
+                    (
+                        client_name,
+                        show_name,
+                        tasks,
+                        shot_code,
+                        review_notes,
+                        source_ref,
+                    )
                 )
                 params = _grid_db_params(row, status)
                 if existing_grid_id:
@@ -591,12 +870,26 @@ def bulk_upsert_production_grid(current_user_id):
                     )
                     cursor.execute(
                         insert_sql,
-                        (grid_id, client_name, show_name, shot_code, *params),
+                        (
+                            grid_id,
+                            client_name,
+                            show_name,
+                            shot_code,
+                            source_ref or None,
+                            *params,
+                        ),
                     )
                     # Remember in-batch inserts so a duplicate row later in the
                     # same file updates this row instead of duplicating it.
                     existing_map[
-                        (client_name, show_name, tasks, shot_code, review_notes)
+                        (
+                            client_name,
+                            show_name,
+                            tasks,
+                            shot_code,
+                            review_notes,
+                            source_ref,
+                        )
                     ] = grid_id
                     write_activity_log(
                         current_user_id,

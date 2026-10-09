@@ -933,8 +933,13 @@ def delete_production_grid_row(current_user_id, grid_id):
             "Access denied: delete is disabled for your department", 403
         )
 
+    conn = None
     try:
-        run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        conn = get_db()
+        cursor = conn.cursor(buffered=True)
+        cursor.execute("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        if not cursor.rowcount:
+            return failure("Production grid row not found", 404)
         write_activity_log(
             current_user_id,
             "Production Management",
@@ -947,6 +952,9 @@ def delete_production_grid_row(current_user_id, grid_id):
         )
     except Exception as e:
         return failure(f"Failed to delete grid row: {e}", 500)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @production_bp.route("/grid/bulk-delete", methods=["POST"])

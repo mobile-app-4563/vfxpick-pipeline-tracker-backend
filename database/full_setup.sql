@@ -400,7 +400,6 @@ INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Admin', '/notifications', TRUE),
 ('Admin', '/hrms', TRUE),
 ('Admin', '/inventory', TRUE),
-('Admin', '/production-management', TRUE),
 ('Admin', '/access-provider', TRUE),
 
 -- Production
@@ -417,7 +416,6 @@ INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Production', '/notifications', TRUE),
 ('Production', '/hrms', TRUE),
 ('Production', '/inventory', TRUE),
-('Production', '/production-management', TRUE),
 
 -- Management
 ('Management', '/home', TRUE),
@@ -433,7 +431,6 @@ INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Management', '/notifications', TRUE),
 ('Management', '/hrms', TRUE),
 ('Management', '/inventory', TRUE),
-('Management', '/production-management', TRUE),
 
 -- Supervisor
 ('Supervisor', '/home', TRUE),
@@ -449,7 +446,6 @@ INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Supervisor', '/notifications', TRUE),
 ('Supervisor', '/hrms', TRUE),
 ('Supervisor', '/inventory', TRUE),
-('Supervisor', '/production-management', TRUE),
 
 -- Team Lead
 ('Team Lead', '/home', TRUE),
@@ -465,7 +461,6 @@ INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Team Lead', '/notifications', TRUE),
 ('Team Lead', '/hrms', TRUE),
 ('Team Lead', '/inventory', TRUE),
-('Team Lead', '/production-management', TRUE),
 
 -- Artist
 ('Artist', '/home', TRUE),

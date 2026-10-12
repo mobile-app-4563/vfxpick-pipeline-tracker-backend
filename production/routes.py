@@ -711,16 +711,12 @@ def bulk_upsert_production_grid(current_user_id):
     Client/show are stored as plain names in production_grid — no dependency
     on the shared clients/shows tables.
 
-    A row is identified by
-    (client_name, show_name, tasks, shot_code, review_notes, source_row_ref),
-    where ``sourceRowRef`` is the line's row number inside the imported file
-    (e.g. "Sheet1!12"). That keeps every physical spreadsheet line as its own
-    grid row even when shot/department/notes repeat - which is the normal case,
-    since each line carries its own Frames / ETA / man-days / Status - while a
-    re-import of the SAME file updates those rows instead of duplicating them.
-    Rows sent without a ``sourceRowRef`` (manual entries) fall back to the old
-    (client, show, tasks, shot_code, review_notes) identity. Duplicate rows
-    WITHIN the same batch also update the first occurrence (never duplicated).
+    A row is identified by (tasks, review_notes). ``sourceRowRef``
+    is retained as provenance only; it is deliberately not part of identity,
+    so imports update rows created by older versions that have no source ref,
+    regardless of their client, show, or shot values.
+    Duplicate rows within the same batch update the same row, and the last
+    record wins.
     The ``tasks`` (department) value is normalised but NEVER rejected for being
     unknown — only a missing shotCode or a blank department is an error.
     """
@@ -777,46 +773,45 @@ def bulk_upsert_production_grid(current_user_id):
         # performs for DDL cannot disturb the import transaction.
         _ensure_grid_source_row_ref(cursor)
 
-        # ── Batch-fetch existing rows per (client, show, tasks) ────────────
-        # review_notes and source_row_ref are part of the identity so each
-        # feedback round AND each physical file line keeps its own row.
+        # ── Batch-fetch existing rows by task/remarks identity ─────────────
+        # source_row_ref is provenance, not identity. This lets imports update
+        # rows created before source references were introduced.
         existing_map = {}
+        duplicate_grid_ids = set()
         unique_groups = {
             (
-                _grid_null(row.get("client")) or "",
-                _grid_null(row.get("show")) or "",
                 tasks,
                 _grid_null(row.get("reviewNotes")) or "",
-                source_ref,
             )
             for idx, row, _, tasks, source_ref in valid_rows
         }
         for (
-            client_name,
-            show_name,
             tasks,
             review_notes,
-            source_ref,
         ) in unique_groups:
             cursor.execute(
                 "SELECT grid_id, client_name, show_name, tasks, shot_code, "
                 "review_notes, source_row_ref "
-                "FROM production_grid WHERE client_name = %s AND show_name = %s "
-                "AND tasks = %s AND COALESCE(review_notes, '') = COALESCE(%s, '') "
-                "AND COALESCE(source_row_ref, '') = %s",
-                (client_name, show_name, tasks, review_notes, source_ref),
+                "FROM production_grid WHERE tasks = %s "
+                "AND COALESCE(review_notes, '') = COALESCE(%s, '')",
+                (tasks, review_notes),
             )
             for r in cursor.fetchall():
-                existing_map[
-                    (
-                        r["client_name"],
-                        r["show_name"],
-                        r["tasks"],
-                        r["shot_code"],
-                        r["review_notes"] or "",
-                        r["source_row_ref"] or "",
-                    )
-                ] = r["grid_id"]
+                logical_key = (
+                    r["tasks"],
+                    r["review_notes"] or "",
+                )
+                previous_id = existing_map.get(logical_key)
+                if previous_id:
+                    duplicate_grid_ids.add(previous_id)
+                existing_map[logical_key] = r["grid_id"]
+
+        if duplicate_grid_ids:
+            placeholders = ", ".join(["%s"] * len(duplicate_grid_ids))
+            cursor.execute(
+                f"DELETE FROM production_grid WHERE grid_id IN ({placeholders})",
+                tuple(duplicate_grid_ids),
+            )
 
         update_sql = f"""
             UPDATE production_grid
@@ -839,12 +834,8 @@ def bulk_upsert_production_grid(current_user_id):
                 status = _grid_status(row.get("status"))
                 existing_grid_id = existing_map.get(
                     (
-                        client_name,
-                        show_name,
                         tasks,
-                        shot_code,
                         review_notes,
-                        source_ref,
                     )
                 )
                 params = _grid_db_params(row, status)
@@ -883,12 +874,8 @@ def bulk_upsert_production_grid(current_user_id):
                     # same file updates this row instead of duplicating it.
                     existing_map[
                         (
-                            client_name,
-                            show_name,
                             tasks,
-                            shot_code,
                             review_notes,
-                            source_ref,
                         )
                     ] = grid_id
                     write_activity_log(
@@ -933,8 +920,13 @@ def delete_production_grid_row(current_user_id, grid_id):
             "Access denied: delete is disabled for your department", 403
         )
 
+    conn = None
     try:
-        run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        conn = get_db()
+        cursor = conn.cursor(buffered=True)
+        cursor.execute("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        if not cursor.rowcount:
+            return failure("Production grid row not found", 404)
         write_activity_log(
             current_user_id,
             "Production Management",
@@ -947,6 +939,9 @@ def delete_production_grid_row(current_user_id, grid_id):
         )
     except Exception as e:
         return failure(f"Failed to delete grid row: {e}", 500)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @production_bp.route("/grid/bulk-delete", methods=["POST"])

@@ -1,6 +1,6 @@
 -- ============================================================
--- VFXPick Pipeline Restructure - Full Setup (Database + Schema + Seed)
--- Run this file once in MySQL to create everything end-to-end.
+-- VFXPick Pipeline - Idempotent Database Setup and Upgrade
+-- Run this single file for a new or existing database.
 -- Domain: Departments (ROTO, PAINT, MM, COMP) -> Clients -> Shows -> Shots
 --
 -- This is the single source of truth. It includes:
@@ -10,9 +10,7 @@
 --   * chat_messages / attachments / notifications tables
 --   * Performance composite indexes on shots (formerly separate
 --     migration_perf_indexes.sql)
--- The old standalone migrations (migration_001_add_excel_fields.sql,
--- migration_002_ensure_content_tables.sql, migration_perf_indexes.sql)
--- are consolidated here and should no longer be needed.
+-- Existing tables, rows, columns, and permissions are preserved.
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS vfxpick_pipeline
@@ -23,31 +21,11 @@ USE vfxpick_pipeline;
 
 SET FOREIGN_KEY_CHECKS = 0;
 
-DROP TABLE IF EXISTS attachments;
-DROP TABLE IF EXISTS chat_messages;
-DROP TABLE IF EXISTS notifications;
-DROP TABLE IF EXISTS department_menu_permissions;
-DROP TABLE IF EXISTS department_menu_permission_audit;
-DROP TABLE IF EXISTS role_menu_permissions;
-DROP TABLE IF EXISTS role_menu_permission_audit;
-DROP TABLE IF EXISTS activity_audit_log;
-DROP TABLE IF EXISTS user_settings;
-DROP TABLE IF EXISTS shots;
-DROP TABLE IF EXISTS shows;
-DROP TABLE IF EXISTS clients;
-DROP TABLE IF EXISTS tasks;
-DROP TABLE IF EXISTS projects;
-DROP TABLE IF EXISTS departments;
-DROP TABLE IF EXISTS project_department_mapping;
-DROP TABLE IF EXISTS users;
-
-SET FOREIGN_KEY_CHECKS = 1;
-
 -- ============================================================
 -- TABLE 1: users  (auth + teams + artist assignment)
 -- role/department stored as VARCHAR so auth stays flexible.
 -- ============================================================
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     user_id         VARCHAR(20)     PRIMARY KEY,
     name            VARCHAR(100)    NOT NULL,
     email           VARCHAR(150)    NOT NULL UNIQUE,
@@ -70,7 +48,7 @@ CREATE TABLE users (
 -- ============================================================
 -- TABLE 2: user_settings  (kept so auth /register keeps working)
 -- ============================================================
-CREATE TABLE user_settings (
+CREATE TABLE IF NOT EXISTS user_settings (
     user_id                 VARCHAR(20)     PRIMARY KEY,
     theme_mode              ENUM('dark', 'light') NOT NULL DEFAULT 'dark',
     email_notifications     BOOLEAN         NOT NULL DEFAULT TRUE,
@@ -83,7 +61,7 @@ CREATE TABLE user_settings (
 -- ============================================================
 -- TABLE 3: clients
 -- ============================================================
-CREATE TABLE clients (
+CREATE TABLE IF NOT EXISTS clients (
     client_id       VARCHAR(20)     PRIMARY KEY,       -- e.g. '108', '110'
     client_name     VARCHAR(150)    NOT NULL,
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP
@@ -92,7 +70,7 @@ CREATE TABLE clients (
 -- ============================================================
 -- TABLE 4: shows
 -- ============================================================
-CREATE TABLE shows (
+CREATE TABLE IF NOT EXISTS shows (
     show_id         VARCHAR(20)     PRIMARY KEY,
     client_id       VARCHAR(20)     NOT NULL,
     show_name       VARCHAR(200)    NOT NULL,
@@ -105,7 +83,7 @@ CREATE TABLE shows (
 -- ============================================================
 -- TABLE 5: shots  (the core entity)
 -- ============================================================
-CREATE TABLE shots (
+CREATE TABLE IF NOT EXISTS shots (
     shot_id            VARCHAR(20)  PRIMARY KEY,
     show_id            VARCHAR(20)  NOT NULL,
     department         VARCHAR(20)  NOT NULL,          -- ROTO | PAINT | MM | COMP
@@ -171,7 +149,7 @@ CREATE TABLE shots (
 -- ============================================================
 -- TABLE 6: chat_messages  (per-shot chat with attachment metadata)
 -- ============================================================
-CREATE TABLE chat_messages (
+CREATE TABLE IF NOT EXISTS chat_messages (
     message_id      VARCHAR(30)     PRIMARY KEY,
     shot_id         VARCHAR(20)     DEFAULT NULL,
     sender_id       VARCHAR(20)     DEFAULT NULL,
@@ -189,7 +167,7 @@ CREATE TABLE chat_messages (
 -- ============================================================
 -- TABLE 7: attachments  (supporting materials / shared documents)
 -- ============================================================
-CREATE TABLE attachments (
+CREATE TABLE IF NOT EXISTS attachments (
     attachment_id   VARCHAR(30)     PRIMARY KEY,
     shot_id         VARCHAR(20)     DEFAULT NULL,
     uploaded_by     VARCHAR(20)     DEFAULT NULL,
@@ -206,7 +184,7 @@ CREATE TABLE attachments (
 -- ============================================================
 -- TABLE 8: notifications
 -- ============================================================
-CREATE TABLE notifications (
+CREATE TABLE IF NOT EXISTS notifications (
     id              VARCHAR(30)     PRIMARY KEY,
     user_id         VARCHAR(20)     DEFAULT NULL,
     message         TEXT            NOT NULL,
@@ -223,7 +201,7 @@ CREATE TABLE notifications (
 -- ============================================================
 -- TABLE 9: role_menu_permissions (Access Provider persistence)
 -- ============================================================
-CREATE TABLE role_menu_permissions (
+CREATE TABLE IF NOT EXISTS role_menu_permissions (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     role            VARCHAR(50)     NOT NULL,
     route           VARCHAR(100)    NOT NULL,
@@ -238,7 +216,7 @@ CREATE TABLE role_menu_permissions (
 -- ============================================================
 -- TABLE 10: role_menu_permission_audit (permission change history)
 -- ============================================================
-CREATE TABLE role_menu_permission_audit (
+CREATE TABLE IF NOT EXISTS role_menu_permission_audit (
     id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
     changed_by_user_id  VARCHAR(20)     NOT NULL,
     action              VARCHAR(30)     NOT NULL,      -- update | reset
@@ -258,7 +236,7 @@ CREATE TABLE role_menu_permission_audit (
 -- Effective menus = role menus INTERSECT department menus, so both
 -- permission sets are stored and enforced together.
 -- ============================================================
-CREATE TABLE department_menu_permissions (
+CREATE TABLE IF NOT EXISTS department_menu_permissions (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     department      VARCHAR(50)     NOT NULL,
     route           VARCHAR(100)    NOT NULL,
@@ -273,7 +251,7 @@ CREATE TABLE department_menu_permissions (
 -- ============================================================
 -- TABLE 10c: department_menu_permission_audit (department permission change history)
 -- ============================================================
-CREATE TABLE department_menu_permission_audit (
+CREATE TABLE IF NOT EXISTS department_menu_permission_audit (
     id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
     changed_by_user_id  VARCHAR(20)     NOT NULL,
     action              VARCHAR(30)     NOT NULL,      -- update | reset
@@ -291,7 +269,7 @@ CREATE TABLE department_menu_permission_audit (
 -- ============================================================
 -- TABLE 11: activity_audit_log (all module changes)
 -- ============================================================
-CREATE TABLE activity_audit_log (
+CREATE TABLE IF NOT EXISTS activity_audit_log (
     id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
     changed_by_user_id  VARCHAR(20)     NOT NULL,
     module              VARCHAR(80)     NOT NULL,
@@ -311,7 +289,7 @@ CREATE TABLE activity_audit_log (
 -- password for all seed users: password123
 -- ============================================================
 
-INSERT INTO users (user_id, name, email, department, password_hash, role, level, status, avatar) VALUES
+INSERT IGNORE INTO users (user_id, name, email, department, password_hash, role, level, status, avatar) VALUES
 ('USR001', 'Admin',           'admin@vfxpick.com',    'Production', '$2b$12$VkM9exoH3DptxS06euqDb.9iDtake4NljaR2WeykTWb0SSMCII4zq', 'Admin',      NULL,     'Active', 'AD'),
 ('USR002', 'Production Head',  'prod@vfxpick.com',     'Production', '$2b$12$VkM9exoH3DptxS06euqDb.9iDtake4NljaR2WeykTWb0SSMCII4zq', 'Production', NULL,     'Active', 'PH'),
 ('USR003', 'Roto Supervisor',  'roto.sup@vfxpick.com', 'ROTO',      '$2b$12$VkM9exoH3DptxS06euqDb.9iDtake4NljaR2WeykTWb0SSMCII4zq', 'Supervisor', NULL,     'Active', 'RS'),
@@ -323,25 +301,25 @@ INSERT INTO users (user_id, name, email, department, password_hash, role, level,
 ('USR009', 'Ravi',             'ravi@vfxpick.com',     'MM',         '$2b$12$VkM9exoH3DptxS06euqDb.9iDtake4NljaR2WeykTWb0SSMCII4zq', 'Artist',     'Junior', 'Active', 'RA'),
 ('USR010', 'MM Lead',          'mm.lead@vfxpick.com',  'MM',         '$2b$12$VkM9exoH3DptxS06euqDb.9iDtake4NljaR2WeykTWb0SSMCII4zq', 'Team Lead',  NULL,     'Active', 'ML');
 
-INSERT INTO user_settings (user_id) VALUES
+INSERT IGNORE INTO user_settings (user_id) VALUES
 ('USR001'), ('USR002'), ('USR003'), ('USR004'), ('USR005'),
 ('USR006'), ('USR007'), ('USR008'), ('USR009'), ('USR010');
 
-INSERT INTO clients (client_id, client_name) VALUES
+INSERT IGNORE INTO clients (client_id, client_name) VALUES
 ('108', 'Client 108'),
 ('110', 'Client 110'),
 ('120', 'Client 120'),
 ('156', 'Client 156'),
 ('218', 'Client 218');
 
-INSERT INTO shows (show_id, client_id, show_name) VALUES
+INSERT IGNORE INTO shows (show_id, client_id, show_name) VALUES
 ('SHW001', '108', 'Cyber Horizon'),
 ('SHW002', '110', 'Dragon Realm'),
 ('SHW003', '120', 'Desert Storm'),
 ('SHW004', '156', 'Ocean Deep'),
 ('SHW005', '218', 'Night City');
 
-INSERT INTO shots
+INSERT IGNORE INTO shots
     (shot_id, show_id, department, shot_code, frame_in, frame_out, total_frames,
      supervisor_bid, client_bid, client_eta, notes, status, artist_id, level_of_shot,
      artist_bid, artist_eta, description, supervisor_status, artist_status, coordinator,
@@ -393,11 +371,11 @@ VALUES
  NULL, 'Critical', DATE_ADD(CURDATE(), INTERVAL 12 DAY), NULL,
  NULL, NULL, NULL, NULL);
 
-INSERT INTO chat_messages (message_id, shot_id, sender_id, message, created_at) VALUES
+INSERT IGNORE INTO chat_messages (message_id, shot_id, sender_id, message, created_at) VALUES
 ('MSG001', 'SHT001', 'USR003', 'Please tighten the matte around the shoulder.', DATE_SUB(NOW(), INTERVAL 3 HOUR)),
 ('MSG002', 'SHT001', 'USR005', 'On it, will submit for QC by EOD.',             DATE_SUB(NOW(), INTERVAL 2 HOUR));
 
-INSERT INTO notifications (id, user_id, message, type, is_read, timestamp) VALUES
+INSERT IGNORE INTO notifications (id, user_id, message, type, is_read, timestamp) VALUES
 ('NTF001', 'USR005', 'New shot CYB_010_0010 has been assigned to you.',    'Task Assigned', FALSE, DATE_SUB(NOW(), INTERVAL 2 HOUR)),
 ('NTF002', 'USR003', 'Shot CYB_010_0010 submitted for QC by Sunil Kumar.', 'QC Submitted',  FALSE, DATE_SUB(NOW(), INTERVAL 1 HOUR));
 
@@ -407,7 +385,7 @@ INSERT INTO notifications (id, user_id, message, type, is_read, timestamp) VALUE
 -- Production/Management/Supervisor/Team Lead: full module access minus Access Provider.
 -- Artist: restricted menu.
 -- ============================================================
-INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
+INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
 -- Admin
 ('Admin', '/home', TRUE),
 ('Admin', '/dashboard', TRUE),
@@ -422,6 +400,7 @@ INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Admin', '/notifications', TRUE),
 ('Admin', '/hrms', TRUE),
 ('Admin', '/inventory', TRUE),
+('Admin', '/production-management', TRUE),
 ('Admin', '/access-provider', TRUE),
 
 -- Production
@@ -438,6 +417,7 @@ INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Production', '/notifications', TRUE),
 ('Production', '/hrms', TRUE),
 ('Production', '/inventory', TRUE),
+('Production', '/production-management', TRUE),
 
 -- Management
 ('Management', '/home', TRUE),
@@ -453,6 +433,7 @@ INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Management', '/notifications', TRUE),
 ('Management', '/hrms', TRUE),
 ('Management', '/inventory', TRUE),
+('Management', '/production-management', TRUE),
 
 -- Supervisor
 ('Supervisor', '/home', TRUE),
@@ -468,6 +449,7 @@ INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Supervisor', '/notifications', TRUE),
 ('Supervisor', '/hrms', TRUE),
 ('Supervisor', '/inventory', TRUE),
+('Supervisor', '/production-management', TRUE),
 
 -- Team Lead
 ('Team Lead', '/home', TRUE),
@@ -483,9 +465,259 @@ INSERT INTO role_menu_permissions (role, route, is_allowed) VALUES
 ('Team Lead', '/notifications', TRUE),
 ('Team Lead', '/hrms', TRUE),
 ('Team Lead', '/inventory', TRUE),
+('Team Lead', '/production-management', TRUE),
 
 -- Artist
 ('Artist', '/home', TRUE),
 ('Artist', '/dashboard', TRUE),
 ('Artist', '/tasks', TRUE),
 ('Artist', '/notifications', TRUE);
+
+-- ============================================================
+-- IDEMPOTENT UPGRADES FOR EXISTING INSTALLATIONS
+-- ============================================================
+
+-- Excel columns added to shots by the former migration_004.
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'month'
+), 'ALTER TABLE shots ADD COLUMN month VARCHAR(20) DEFAULT NULL AFTER coordinator', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'client_for_ref'
+), 'ALTER TABLE shots ADD COLUMN client_for_ref VARCHAR(100) DEFAULT NULL AFTER allocated_date', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'wip_eta'
+), 'ALTER TABLE shots ADD COLUMN wip_eta DATE DEFAULT NULL AFTER client_for_ref', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'work_station'
+), 'ALTER TABLE shots ADD COLUMN work_station VARCHAR(100) DEFAULT NULL AFTER complete_date', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'approved_client_md'
+), 'ALTER TABLE shots ADD COLUMN approved_client_md DECIMAL(6,2) DEFAULT 0 AFTER mandays', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'fl_eta'
+), 'ALTER TABLE shots ADD COLUMN fl_eta DATE DEFAULT NULL AFTER approved_client_md', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'fl_mandays'
+), 'ALTER TABLE shots ADD COLUMN fl_mandays DECIMAL(6,2) DEFAULT 0 AFTER fl_eta', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+ALTER TABLE shots MODIFY COLUMN department VARCHAR(255) NOT NULL;
+
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'shots' AND column_name = 'priority'
+), 'ALTER TABLE shots ADD COLUMN priority VARCHAR(50) DEFAULT NULL AFTER complexity', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Production concerns/issues table.
+CREATE TABLE IF NOT EXISTS production_data (
+    production_id VARCHAR(20) PRIMARY KEY,
+    show_id VARCHAR(20) NOT NULL,
+    shot_id VARCHAR(20) DEFAULT NULL,
+    concern_type VARCHAR(100) DEFAULT NULL,
+    concern_description TEXT DEFAULT NULL,
+    status ENUM('Open', 'In Progress', 'Resolved', 'On Hold') NOT NULL DEFAULT 'Open',
+    priority ENUM('Low', 'Medium', 'High', 'Critical') NOT NULL DEFAULT 'Medium',
+    assigned_to VARCHAR(20) DEFAULT NULL,
+    reported_by VARCHAR(20) DEFAULT NULL,
+    reported_date DATE NOT NULL DEFAULT (CURDATE()),
+    due_date DATE DEFAULT NULL,
+    resolved_date DATE DEFAULT NULL,
+    planned_resolution VARCHAR(500) DEFAULT NULL,
+    actual_resolution VARCHAR(500) DEFAULT NULL,
+    impact_area VARCHAR(100) DEFAULT NULL,
+    estimated_effort DECIMAL(6,2) DEFAULT 0,
+    actual_effort DECIMAL(6,2) DEFAULT 0,
+    comments TEXT DEFAULT NULL,
+    attachments_url VARCHAR(1000) DEFAULT NULL,
+    department VARCHAR(50) NOT NULL DEFAULT 'Production',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    updated_by VARCHAR(20) DEFAULT NULL,
+    FOREIGN KEY (show_id) REFERENCES shows(show_id) ON DELETE CASCADE,
+    FOREIGN KEY (shot_id) REFERENCES shots(shot_id) ON DELETE SET NULL,
+    FOREIGN KEY (assigned_to) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY (reported_by) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by) REFERENCES users(user_id) ON DELETE SET NULL,
+    INDEX idx_production_show (show_id),
+    INDEX idx_production_shot (shot_id),
+    INDEX idx_production_status (status),
+    INDEX idx_production_priority (priority),
+    INDEX idx_production_assigned (assigned_to),
+    INDEX idx_production_dept (department),
+    INDEX idx_production_reported (reported_date),
+    INDEX idx_production_show_status (show_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Dedicated 20-column production-management grid.
+CREATE TABLE IF NOT EXISTS production_grid (
+    grid_id VARCHAR(30) PRIMARY KEY,
+    coordinator VARCHAR(100) DEFAULT NULL,
+    month VARCHAR(20) DEFAULT NULL,
+    shots_received_date DATE DEFAULT NULL,
+    client_for_ref VARCHAR(100) DEFAULT NULL,
+    client_name VARCHAR(150) DEFAULT NULL,
+    show_name VARCHAR(200) DEFAULT NULL,
+    wip_eta DATE DEFAULT NULL,
+    eta DATE DEFAULT NULL,
+    shot_code VARCHAR(50) DEFAULT NULL,
+    frames INT DEFAULT 0,
+    tasks VARCHAR(255) DEFAULT NULL,
+    review_notes TEXT DEFAULT NULL,
+    source_row_ref VARCHAR(80) DEFAULT NULL,
+    status ENUM('Hold', 'Approved', 'Awaiting Approval', 'Approved Internal',
+                'Bidding', 'Bids Received', 'WIP', 'Delivered',
+                'Awaiting Reference', 'Awaiting Plates', 'Completed', 'RTU',
+                'Rough Cost Shared') NOT NULL DEFAULT 'Awaiting Approval',
+    delivered_on DATE DEFAULT NULL,
+    work_station VARCHAR(100) DEFAULT NULL,
+    shot_mandays DECIMAL(6,2) DEFAULT 0,
+    approved_client_md DECIMAL(6,2) DEFAULT 0,
+    fl_eta DATE DEFAULT NULL,
+    fl_mandays DECIMAL(6,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    updated_by VARCHAR(20) DEFAULT NULL,
+    INDEX idx_production_grid_status (status),
+    INDEX idx_production_grid_month (month),
+    INDEX idx_production_grid_show (show_name),
+    INDEX idx_production_grid_shot (shot_code),
+    INDEX idx_production_grid_source_ref (source_row_ref)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Upgrade older production_grid tables without dropping their data.
+SET @sql := IF(NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'production_grid' AND column_name = 'source_row_ref'
+), 'ALTER TABLE production_grid ADD COLUMN source_row_ref VARCHAR(80) DEFAULT NULL AFTER review_notes', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+ALTER TABLE production_grid MODIFY COLUMN tasks VARCHAR(255) DEFAULT NULL;
+ALTER TABLE production_grid MODIFY COLUMN status ENUM(
+    'Hold', 'Approved', 'Awaiting Approval', 'Approved Internal', 'Bidding',
+    'Bids Received', 'WIP', 'Delivered', 'Awaiting Reference',
+    'Awaiting Plates', 'Completed', 'RTU', 'Rough Cost Shared'
+) NOT NULL DEFAULT 'Awaiting Approval';
+
+-- Seed the grid only when it was newly created and is still empty.
+INSERT INTO production_grid (
+    grid_id, coordinator, month, shots_received_date, client_for_ref,
+    client_name, show_name, wip_eta, eta, shot_code, frames, tasks,
+    review_notes, status, delivered_on, work_station, shot_mandays,
+    approved_client_md, fl_eta, fl_mandays, created_at, updated_at
+)
+SELECT
+    CONCAT('GRID', LPAD(ROW_NUMBER() OVER (ORDER BY s.created_at, s.shot_id), 6, '0')),
+    s.coordinator, s.month, s.allocated_date, s.client_for_ref,
+    c.client_name, sh.show_name, s.wip_eta, s.client_eta, s.shot_code,
+    s.total_frames, s.department, s.comments, s.status, s.complete_date,
+    s.work_station, s.mandays, s.approved_client_md, s.fl_eta, s.fl_mandays,
+    s.created_at, s.updated_at
+FROM shots s
+JOIN shows sh ON s.show_id = sh.show_id
+JOIN clients c ON sh.client_id = c.client_id
+WHERE NOT EXISTS (SELECT 1 FROM production_grid);
+
+-- The import identity is Tasks + Review Notes only. Keep the newest row for
+-- each pair and remove older duplicates left by previous import versions.
+DELETE older
+FROM production_grid older
+JOIN production_grid newer
+  ON LOWER(TRIM(COALESCE(older.tasks, ''))) = LOWER(TRIM(COALESCE(newer.tasks, '')))
+ AND LOWER(TRIM(COALESCE(older.review_notes, ''))) = LOWER(TRIM(COALESCE(newer.review_notes, '')))
+ AND (
+      newer.updated_at > older.updated_at
+      OR (newer.updated_at = older.updated_at AND newer.grid_id > older.grid_id)
+ )
+WHERE older.grid_id <> newer.grid_id;
+
+-- Recover the day encoded in legacy mmm-yy imports. This is idempotent because
+-- repaired values no longer have day 1.
+CREATE TABLE IF NOT EXISTS production_grid_date_backup_013 AS
+SELECT grid_id, shots_received_date, wip_eta, eta, delivered_on, fl_eta,
+       NOW() AS backed_up_at
+FROM production_grid;
+
+UPDATE production_grid
+SET shots_received_date = CASE
+    WHEN shots_received_date IS NULL OR DAY(shots_received_date) <> 1 THEN shots_received_date
+    WHEN YEAR(shots_received_date) % 100 BETWEEN 2 AND 31
+     AND YEAR(shots_received_date) % 100 <= DAY(LAST_DAY(DATE_FORMAT(shots_received_date, '2000-%m-01')))
+     AND NOT (MONTH(shots_received_date) = 2 AND YEAR(shots_received_date) % 100 = 29
+              AND DAY(LAST_DAY(CONCAT(YEAR(CURDATE()), '-02-01'))) < 29)
+    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(shots_received_date), 2, '0'), '-',
+                            LPAD(YEAR(shots_received_date) % 100, 2, '0')), '%Y-%m-%d')
+    ELSE shots_received_date END,
+    wip_eta = CASE
+    WHEN wip_eta IS NULL OR DAY(wip_eta) <> 1 THEN wip_eta
+    WHEN YEAR(wip_eta) % 100 BETWEEN 2 AND 31
+     AND YEAR(wip_eta) % 100 <= DAY(LAST_DAY(DATE_FORMAT(wip_eta, '2000-%m-01')))
+     AND NOT (MONTH(wip_eta) = 2 AND YEAR(wip_eta) % 100 = 29
+              AND DAY(LAST_DAY(CONCAT(YEAR(CURDATE()), '-02-01'))) < 29)
+    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(wip_eta), 2, '0'), '-',
+                            LPAD(YEAR(wip_eta) % 100, 2, '0')), '%Y-%m-%d')
+    ELSE wip_eta END,
+    eta = CASE
+    WHEN eta IS NULL OR DAY(eta) <> 1 THEN eta
+    WHEN YEAR(eta) % 100 BETWEEN 2 AND 31
+     AND YEAR(eta) % 100 <= DAY(LAST_DAY(DATE_FORMAT(eta, '2000-%m-01')))
+     AND NOT (MONTH(eta) = 2 AND YEAR(eta) % 100 = 29
+              AND DAY(LAST_DAY(CONCAT(YEAR(CURDATE()), '-02-01'))) < 29)
+    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(eta), 2, '0'), '-',
+                            LPAD(YEAR(eta) % 100, 2, '0')), '%Y-%m-%d')
+    ELSE eta END,
+    delivered_on = CASE
+    WHEN delivered_on IS NULL OR DAY(delivered_on) <> 1 THEN delivered_on
+    WHEN YEAR(delivered_on) % 100 BETWEEN 2 AND 31
+     AND YEAR(delivered_on) % 100 <= DAY(LAST_DAY(DATE_FORMAT(delivered_on, '2000-%m-01')))
+     AND NOT (MONTH(delivered_on) = 2 AND YEAR(delivered_on) % 100 = 29
+              AND DAY(LAST_DAY(CONCAT(YEAR(CURDATE()), '-02-01'))) < 29)
+    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(delivered_on), 2, '0'), '-',
+                            LPAD(YEAR(delivered_on) % 100, 2, '0')), '%Y-%m-%d')
+    ELSE delivered_on END,
+    fl_eta = CASE
+    WHEN fl_eta IS NULL OR DAY(fl_eta) <> 1 THEN fl_eta
+    WHEN YEAR(fl_eta) % 100 BETWEEN 2 AND 31
+     AND YEAR(fl_eta) % 100 <= DAY(LAST_DAY(DATE_FORMAT(fl_eta, '2000-%m-01')))
+     AND NOT (MONTH(fl_eta) = 2 AND YEAR(fl_eta) % 100 = 29
+              AND DAY(LAST_DAY(CONCAT(YEAR(CURDATE()), '-02-01'))) < 29)
+    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(fl_eta), 2, '0'), '-',
+                            LPAD(YEAR(fl_eta) % 100, 2, '0')), '%Y-%m-%d')
+    ELSE fl_eta END
+WHERE DAY(shots_received_date) = 1 OR DAY(wip_eta) = 1 OR DAY(eta) = 1
+   OR DAY(delivered_on) = 1 OR DAY(fl_eta) = 1;
+
+-- Repair legacy zero dates without touching real dates.
+UPDATE production_grid SET wip_eta = NULL WHERE wip_eta < '1900-01-01';
+UPDATE production_grid SET delivered_on = NULL WHERE delivered_on < '1900-01-01';
+UPDATE production_grid SET fl_eta = NULL WHERE fl_eta < '1900-01-01';
+UPDATE shots SET starting_date = NULL WHERE starting_date < '1900-01-01';
+
+-- Restore the production-management permissions without changing explicit denies.
+INSERT IGNORE INTO role_menu_permissions (role, route, is_allowed) VALUES
+    ('Admin', '/production-management', TRUE),
+    ('Production', '/production-management', TRUE),
+    ('Management', '/production-management', TRUE),
+    ('Supervisor', '/production-management', TRUE),
+    ('Team Lead', '/production-management', TRUE);
+
+SET FOREIGN_KEY_CHECKS = 1;

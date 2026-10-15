@@ -710,10 +710,13 @@ def bulk_upsert_production_grid(current_user_id):
     Client/show are stored as plain names in production_grid — no dependency
     on the shared clients/shows tables.
 
-    Every valid source row is inserted as a new database row. No existing-row
-    lookup, identity matching, or duplicate collapse is performed. This is
-    intentional: repeated spreadsheet lines are separate records and repeated
-    imports must be saved as separate records.
+    A row is identified by (client, show, shot_code, tasks, review_notes).
+    ``sourceRowRef``
+    is retained as provenance only; it is deliberately not part of identity,
+    so imports update rows created by older versions that have no source ref,
+    regardless of their client, show, or shot values.
+    Duplicate rows within the same batch update the same row, and the last
+    record wins.
     The ``tasks`` (department) value is normalised but NEVER rejected for being
     unknown — only a missing shotCode or a blank department is an error.
     """
@@ -765,6 +768,58 @@ def bulk_upsert_production_grid(current_user_id):
         # performs for DDL cannot disturb the import transaction.
         _ensure_grid_source_row_ref(cursor)
 
+        # ── Batch-fetch existing rows by task/remarks, then use the full
+        # identity below. Filtering by tasks/remarks keeps this to one query per
+        # combination while preserving rows for different shots in the same
+        # department.
+        # source_row_ref is provenance, not identity. This lets imports update
+        # rows created before source references were introduced.
+        existing_map = {}
+        duplicate_grid_ids = set()
+        unique_groups = {
+            (
+                tasks,
+                _grid_null(row.get("reviewNotes")) or "",
+            )
+            for idx, row, _, tasks, source_ref in valid_rows
+        }
+        for (
+            tasks,
+            review_notes,
+        ) in unique_groups:
+            cursor.execute(
+                "SELECT grid_id, client_name, show_name, tasks, shot_code, "
+                "review_notes, source_row_ref "
+                "FROM production_grid WHERE tasks = %s "
+                "AND COALESCE(review_notes, '') = COALESCE(%s, '')",
+                (tasks, review_notes),
+            )
+            for r in cursor.fetchall():
+                logical_key = (
+                    r["client_name"] or "",
+                    r["show_name"] or "",
+                    r["shot_code"] or "",
+                    r["tasks"],
+                    r["review_notes"] or "",
+                )
+                previous_id = existing_map.get(logical_key)
+                if previous_id:
+                    duplicate_grid_ids.add(previous_id)
+                existing_map[logical_key] = r["grid_id"]
+
+        if duplicate_grid_ids:
+            placeholders = ", ".join(["%s"] * len(duplicate_grid_ids))
+            cursor.execute(
+                f"DELETE FROM production_grid WHERE grid_id IN ({placeholders})",
+                tuple(duplicate_grid_ids),
+            )
+
+        update_sql = f"""
+            UPDATE production_grid
+            SET {", ".join([f"{col} = %s" for col in GRID_INSERT_COLUMNS])},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE grid_id = %s
+        """
         insert_sql = f"""
             INSERT INTO production_grid
                 (grid_id, client_name, show_name, shot_code, source_row_ref,
@@ -778,35 +833,67 @@ def bulk_upsert_production_grid(current_user_id):
             review_notes = _grid_null(row.get("reviewNotes")) or ""
             try:
                 status = _grid_status(row.get("status"))
-                params = _grid_db_params(row, status)
-                grid_id = _next_prefixed_id(
-                    cursor,
-                    "production_grid",
-                    "grid_id",
-                    "GRID",
-                    id_state,
-                    "grid",
-                )
-                cursor.execute(
-                    insert_sql,
+                existing_grid_id = existing_map.get(
                     (
-                        grid_id,
                         client_name,
                         show_name,
                         shot_code,
-                        source_ref or None,
-                        *params,
-                    ),
+                        tasks,
+                        review_notes,
+                    )
                 )
-                write_activity_log(
-                    current_user_id,
-                    "Production Management",
-                    "CREATE",
-                    "Production Grid",
-                    grid_id,
-                    {"source": "bulk import", "status": status},
-                )
-                created += 1
+                params = _grid_db_params(row, status)
+                if existing_grid_id:
+                    cursor.execute(update_sql, (*params, existing_grid_id))
+                    write_activity_log(
+                        current_user_id,
+                        "Production Management",
+                        "UPDATE",
+                        "Production Grid",
+                        existing_grid_id,
+                        {"source": "bulk upsert", "status": status},
+                    )
+                    updated += 1
+                else:
+                    grid_id = _next_prefixed_id(
+                        cursor,
+                        "production_grid",
+                        "grid_id",
+                        "GRID",
+                        id_state,
+                        "grid",
+                    )
+                    cursor.execute(
+                        insert_sql,
+                        (
+                            grid_id,
+                            client_name,
+                            show_name,
+                            shot_code,
+                            source_ref or None,
+                            *params,
+                        ),
+                    )
+                    # Remember in-batch inserts so a duplicate row later in the
+                    # same file updates this row instead of duplicating it.
+                    existing_map[
+                        (
+                            client_name,
+                            show_name,
+                            shot_code,
+                            tasks,
+                            review_notes,
+                        )
+                    ] = grid_id
+                    write_activity_log(
+                        current_user_id,
+                        "Production Management",
+                        "CREATE",
+                        "Production Grid",
+                        grid_id,
+                        {"source": "bulk upsert", "status": status},
+                    )
+                    created += 1
             except Exception as e:
                 errors.append(f"Row {idx}: {e}")
 

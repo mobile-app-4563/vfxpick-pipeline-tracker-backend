@@ -448,9 +448,8 @@ def _ensure_grid_tasks_normalized():
 
     Rows imported before the Tasks -> department mapping existed still hold raw
     spreadsheet spellings (``CAMERA TRACK``, ``ROTOANIM``, ``paint / comp``),
-    which the Department filter cannot match. This also aligns the stored
-    ``tasks`` text with what new imports send, so a re-import updates those rows
-    instead of duplicating them.
+    which the Department filter cannot match. This aligns the stored
+    ``tasks`` text with the canonical department values used by the grid.
 
     Runs at most once per process — the first grid read or import after a
     restart does the tidy-up. Values that cannot be recognised are left as they
@@ -705,22 +704,16 @@ def create_production_grid_row(current_user_id):
 @production_bp.route("/grid/bulk-upsert", methods=["POST"])
 @token_required
 def bulk_upsert_production_grid(current_user_id):
-    """Bulk create/update production-grid rows (from Excel/CSV import).
+    """Bulk insert production-grid rows (from Excel/CSV import).
 
     Body: {"rows": [ {grid fields + client/show names}, ... ]}
     Client/show are stored as plain names in production_grid — no dependency
     on the shared clients/shows tables.
 
-    A row is identified by
-    (client_name, show_name, tasks, shot_code, review_notes, source_row_ref),
-    where ``sourceRowRef`` is the line's row number inside the imported file
-    (e.g. "Sheet1!12"). That keeps every physical spreadsheet line as its own
-    grid row even when shot/department/notes repeat - which is the normal case,
-    since each line carries its own Frames / ETA / man-days / Status - while a
-    re-import of the SAME file updates those rows instead of duplicating them.
-    Rows sent without a ``sourceRowRef`` (manual entries) fall back to the old
-    (client, show, tasks, shot_code, review_notes) identity. Duplicate rows
-    WITHIN the same batch also update the first occurrence (never duplicated).
+    Every valid source row is inserted as a new database row. No existing-row
+    lookup, identity matching, or duplicate collapse is performed. This is
+    intentional: repeated spreadsheet lines are separate records and repeated
+    imports must be saved as separate records.
     The ``tasks`` (department) value is normalised but NEVER rejected for being
     unknown — only a missing shotCode or a blank department is an error.
     """
@@ -758,11 +751,6 @@ def bulk_upsert_production_grid(current_user_id):
     if not valid_rows:
         return success({"created": 0, "updated": 0, "errors": errors, "notes": []})
 
-    # Align pre-mapping Tasks spellings BEFORE the identity lookup below:
-    # otherwise a re-import would not match the normalised rows and would
-    # insert duplicates instead of updating them.
-    _ensure_grid_tasks_normalized()
-
     conn = get_db()
     conn.autocommit = False
     created = 0
@@ -777,53 +765,6 @@ def bulk_upsert_production_grid(current_user_id):
         # performs for DDL cannot disturb the import transaction.
         _ensure_grid_source_row_ref(cursor)
 
-        # ── Batch-fetch existing rows per (client, show, tasks) ────────────
-        # review_notes and source_row_ref are part of the identity so each
-        # feedback round AND each physical file line keeps its own row.
-        existing_map = {}
-        unique_groups = {
-            (
-                _grid_null(row.get("client")) or "",
-                _grid_null(row.get("show")) or "",
-                tasks,
-                _grid_null(row.get("reviewNotes")) or "",
-                source_ref,
-            )
-            for idx, row, _, tasks, source_ref in valid_rows
-        }
-        for (
-            client_name,
-            show_name,
-            tasks,
-            review_notes,
-            source_ref,
-        ) in unique_groups:
-            cursor.execute(
-                "SELECT grid_id, client_name, show_name, tasks, shot_code, "
-                "review_notes, source_row_ref "
-                "FROM production_grid WHERE client_name = %s AND show_name = %s "
-                "AND tasks = %s AND COALESCE(review_notes, '') = COALESCE(%s, '') "
-                "AND COALESCE(source_row_ref, '') = %s",
-                (client_name, show_name, tasks, review_notes, source_ref),
-            )
-            for r in cursor.fetchall():
-                existing_map[
-                    (
-                        r["client_name"],
-                        r["show_name"],
-                        r["tasks"],
-                        r["shot_code"],
-                        r["review_notes"] or "",
-                        r["source_row_ref"] or "",
-                    )
-                ] = r["grid_id"]
-
-        update_sql = f"""
-            UPDATE production_grid
-            SET {", ".join([f"{col} = %s" for col in GRID_INSERT_COLUMNS])},
-                updated_at = CURRENT_TIMESTAMP
-            WHERE grid_id = %s
-        """
         insert_sql = f"""
             INSERT INTO production_grid
                 (grid_id, client_name, show_name, shot_code, source_row_ref,
@@ -837,76 +778,42 @@ def bulk_upsert_production_grid(current_user_id):
             review_notes = _grid_null(row.get("reviewNotes")) or ""
             try:
                 status = _grid_status(row.get("status"))
-                existing_grid_id = existing_map.get(
+                params = _grid_db_params(row, status)
+                grid_id = _next_prefixed_id(
+                    cursor,
+                    "production_grid",
+                    "grid_id",
+                    "GRID",
+                    id_state,
+                    "grid",
+                )
+                cursor.execute(
+                    insert_sql,
                     (
+                        grid_id,
                         client_name,
                         show_name,
-                        tasks,
                         shot_code,
-                        review_notes,
-                        source_ref,
-                    )
+                        source_ref or None,
+                        *params,
+                    ),
                 )
-                params = _grid_db_params(row, status)
-                if existing_grid_id:
-                    cursor.execute(update_sql, (*params, existing_grid_id))
-                    write_activity_log(
-                        current_user_id,
-                        "Production Management",
-                        "UPDATE",
-                        "Production Grid",
-                        existing_grid_id,
-                        {"source": "bulk upsert", "status": status},
-                    )
-                    updated += 1
-                else:
-                    grid_id = _next_prefixed_id(
-                        cursor,
-                        "production_grid",
-                        "grid_id",
-                        "GRID",
-                        id_state,
-                        "grid",
-                    )
-                    cursor.execute(
-                        insert_sql,
-                        (
-                            grid_id,
-                            client_name,
-                            show_name,
-                            shot_code,
-                            source_ref or None,
-                            *params,
-                        ),
-                    )
-                    # Remember in-batch inserts so a duplicate row later in the
-                    # same file updates this row instead of duplicating it.
-                    existing_map[
-                        (
-                            client_name,
-                            show_name,
-                            tasks,
-                            shot_code,
-                            review_notes,
-                            source_ref,
-                        )
-                    ] = grid_id
-                    write_activity_log(
-                        current_user_id,
-                        "Production Management",
-                        "CREATE",
-                        "Production Grid",
-                        grid_id,
-                        {"source": "bulk upsert", "status": status},
-                    )
-                    created += 1
+                write_activity_log(
+                    current_user_id,
+                    "Production Management",
+                    "CREATE",
+                    "Production Grid",
+                    grid_id,
+                    {"source": "bulk import", "status": status},
+                )
+                created += 1
             except Exception as e:
                 errors.append(f"Row {idx}: {e}")
 
         conn.commit()
     except Exception as e:
         conn.rollback()
-        return failure(f"Failed to bulk upsert grid: {e}", 500)
+        return failure(f"Failed to import grid rows: {e}", 500)
     finally:
         conn.close()
 
@@ -933,8 +840,13 @@ def delete_production_grid_row(current_user_id, grid_id):
             "Access denied: delete is disabled for your department", 403
         )
 
+    conn = None
     try:
-        run_query("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        conn = get_db()
+        cursor = conn.cursor(buffered=True)
+        cursor.execute("DELETE FROM production_grid WHERE grid_id = %s", [grid_id])
+        if not cursor.rowcount:
+            return failure("Production grid row not found", 404)
         write_activity_log(
             current_user_id,
             "Production Management",
@@ -947,6 +859,9 @@ def delete_production_grid_row(current_user_id, grid_id):
         )
     except Exception as e:
         return failure(f"Failed to delete grid row: {e}", 500)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @production_bp.route("/grid/bulk-delete", methods=["POST"])

@@ -637,10 +637,18 @@ JOIN shows sh ON s.show_id = sh.show_id
 JOIN clients c ON sh.client_id = c.client_id
 WHERE NOT EXISTS (SELECT 1 FROM production_grid);
 
--- Every imported spreadsheet line is an independent record. Do not deduplicate
--- by Tasks, Review Notes, or any other business fields: repeated values are
--- valid and must remain visible in the grid. The bulk import endpoint assigns
--- each row its own grid_id and source_row_ref.
+-- The import identity is Tasks + Review Notes only. Keep the newest row for
+-- each pair and remove older duplicates left by previous import versions.
+DELETE older
+FROM production_grid older
+JOIN production_grid newer
+  ON LOWER(TRIM(COALESCE(older.tasks, ''))) = LOWER(TRIM(COALESCE(newer.tasks, '')))
+ AND LOWER(TRIM(COALESCE(older.review_notes, ''))) = LOWER(TRIM(COALESCE(newer.review_notes, '')))
+ AND (
+      newer.updated_at > older.updated_at
+      OR (newer.updated_at = older.updated_at AND newer.grid_id > older.grid_id)
+ )
+WHERE older.grid_id <> newer.grid_id;
 
 -- Recover the day encoded in legacy mmm-yy imports. This is idempotent because
 -- repaired values no longer have day 1.

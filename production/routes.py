@@ -54,23 +54,6 @@ GRID_FIELDS = {
 }
 
 
-def _order_grid_rows(rows):
-    """Show upcoming ETAs first, nearest due date first; missing dates last."""
-    today = date.today()
-
-    def _eta_order(row):
-        eta = row.get("eta")
-        if isinstance(eta, datetime):
-            eta = eta.date()
-        if eta is None:
-            return (2, 0)
-        if eta >= today:
-            return (0, eta.toordinal())
-        return (1, -eta.toordinal())
-
-    return sorted(rows, key=_eta_order)
-
-
 def _grid_to_json(row, sno):
     """Convert a production_grid row into the 20-column grid payload."""
     if not row:
@@ -117,15 +100,8 @@ def get_production_grid(current_user_id):
         ORDER BY created_at ASC
     """
 
-    # Normalise any Tasks spelling stored before the mapping existed, so the
-    # Department filter can match the rows already in the table. Runs at most
-    # once per process (see _ensure_grid_tasks_normalized).
-    _ensure_grid_tasks_normalized()
-
     try:
         rows = run_query(query, fetch_all=True)
-        # Upcoming ETA rows are listed first, followed by past and undated rows.
-        rows = _order_grid_rows(rows)
         grid = [_grid_to_json(row, idx + 1) for idx, row in enumerate(rows)]
         return success({"rows": grid, "total": len(grid)})
     except Exception as e:
@@ -310,10 +286,9 @@ def _grid_status(value):
 
 
 # ─── Tasks -> pipeline department mapping ────────────────────────────────────
-# Real spreadsheets spell the same work many ways: CAMERA TRACK / OBJECT TRACK
-# / TRACKING are all matchmove, ROTOANIM is rotoscoping and DMP is matte
-# painting. The grid's Department filter only knows ROTO, PAINT, MM and COMP,
-# so every value is translated on the way in.
+# Real spreadsheets spell the built-in work many ways. Runtime-created task
+# labels such as CAMERA TRACK, OBJECT TRACK and ROTOANIM stay separate so the
+# import honours the department list configured by the user.
 #
 # Matching is case-insensitive: "roto", "Roto" and "ROTO" all normalise onto
 # the same canonical department, as do "camera track" / "Camera Track" /
@@ -359,10 +334,8 @@ GRID_TASK_ALIAS = {
     "MATCH MOVE": "MM",
     "MATCHMOTION": "MM",
     "MATCH MOTION": "MM",
-    "CAMERA TRACK": "MM",
     "CAM TRACK": "MM",
     "CAMTRACK": "MM",
-    "OBJECT TRACK": "MM",
     "OBJ TRACK": "MM",
     "PLANAR TRACK": "MM",
     "PLANE TRACK": "MM",
@@ -388,6 +361,13 @@ GRID_TASK_ALIAS = {
 
 # Separators real sheets use between two departments on one row.
 _GRID_TASK_SEPARATOR = re.compile(r"[,/&+]|\bAND\b")
+_PRESERVED_GRID_TASK_LABELS = {
+    "CAMERA TRACK",
+    "OBJECT TRACK",
+    "ROTOANIM",
+    "ROTO ANIM",
+    "ROTOANIMATION",
+}
 
 # Alias keys longest-first, so "ROTO ANIM" wins over "ROTO".
 _GRID_ALIAS_KEYS = sorted(GRID_TASK_ALIAS, key=len, reverse=True)
@@ -422,6 +402,8 @@ def normalize_grid_tasks(raw):
     value = re.sub(r"\s+", " ", str(raw or "").strip().upper())
     if not value:
         return ""
+    if value in _PRESERVED_GRID_TASK_LABELS:
+        return value
     parts = [p.strip() for p in _GRID_TASK_SEPARATOR.split(value) if p.strip()]
     if not parts:
         return value
@@ -612,12 +594,6 @@ def create_production_grid_row(current_user_id):
     show_name = _grid_null(data.get("show")) or ""
     shot_code = _grid_null(data.get("shotCode"))
     tasks = _grid_null(data.get("tasks")) or _grid_null(data.get("department"))
-    if tasks:
-        # Any capitalisation is accepted here. Known spellings are normalised
-        # onto ROTO / PAINT / MM / COMP; an unknown value is kept as-is rather
-        # than rejected.
-        tasks = normalize_grid_tasks(tasks)
-
     if not shot_code or not tasks:
         return failure("shotCode and tasks (department) are required", 400)
 
@@ -742,8 +718,6 @@ def bulk_upsert_production_grid(current_user_id):
             continue
         shot_code = _grid_null(row.get("shotCode"))
         tasks = _grid_null(row.get("tasks")) or _grid_null(row.get("department"))
-        if tasks:
-            tasks = normalize_grid_tasks(tasks)
         source_ref = _grid_null(row.get("sourceRowRef")) or ""
         valid_rows.append((idx, row, shot_code, tasks, source_ref))
 

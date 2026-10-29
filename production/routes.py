@@ -244,6 +244,16 @@ GRID_INSERT_COLUMNS = [
     "fl_mandays",
 ]
 
+# Every column an import writes — the client/show/shot identity columns plus the
+# 20 template columns. Used to refresh an existing row in place, so a
+# re-imported file overwrites the stored Tasks/Status/ETA/… values.
+_GRID_IMPORT_COLUMNS = [
+    "client_name",
+    "show_name",
+    "shot_code",
+    *GRID_INSERT_COLUMNS,
+]
+
 # Grid JSON key -> DB column (a superset of GRID_FIELDS including shotCode).
 # Note: GRID_FIELDS (above) is the live mapping used by /grid/sync; this map
 # is retained for reference/import tooling.
@@ -493,20 +503,26 @@ def create_production_grid_row(current_user_id):
 @production_bp.route("/grid/bulk-upsert", methods=["POST"])
 @token_required
 def bulk_upsert_production_grid(current_user_id):
-    """Bulk insert production-grid rows (from Excel/CSV import).
+    """Import production-grid rows from an Excel/CSV file (true upsert).
 
-    Body: {"rows": [ {grid fields + client/show names}, ... ]}
+    Body: {"rows": [ {grid fields + client/show names + sourceRowRef}, ... ]}
     Client/show are stored as plain names in production_grid — no dependency
     on the shared clients/shows tables.
 
-    Every valid source row is inserted as a new database row. No existing-row
-    lookup, identity matching, or duplicate collapse is performed. This is
-    intentional: repeated spreadsheet lines are separate records and repeated
-    imports must be saved as separate records.
-    The ``tasks`` (department) value is normalised when present. Rows are not
-    rejected for missing shotCode, department, client, or show values: the
-    uploaded spreadsheet is the source of truth and every non-empty row is
-    persisted independently.
+    Row identity is ``source_row_ref`` — the physical line of the imported file
+    (``Sheet1!12``, ``csv:12``, ``paste:12``). One file line is one grid row, so
+    re-importing the same file **updates** those rows in place instead of
+    appending duplicates. That is what keeps the grid in step with the
+    spreadsheet: a corrected Tasks, Status, ETA or man-days cell in the file is
+    written over the stored value on the next import.
+
+    Nothing about the cell contents is validated, mapped or defaulted: the
+    spreadsheet is the source of truth and every column — ``tasks`` included —
+    is written exactly as the file spells it. Rows are never rejected for a
+    missing shotCode, department, client or show.
+
+    Rows without a ``source_row_ref`` (hand-created rows, and clients that do
+    not send one) are inserted, since they have no file line to match.
     """
     user = get_user(current_user_id)
     if not _can_edit_concern(user):
@@ -557,16 +573,59 @@ def bulk_upsert_production_grid(current_user_id):
                  {", ".join(GRID_INSERT_COLUMNS)})
             VALUES (%s, %s, %s, %s, %s, {", ".join(["%s"] * len(GRID_INSERT_COLUMNS))})
         """
+        update_sql = f"""
+            UPDATE production_grid
+            SET {", ".join(f"{column} = %s" for column in _GRID_IMPORT_COLUMNS)},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE grid_id = %s
+        """
+
+        # Existing rows that came from a spreadsheet line, grouped by that
+        # line. A repeated import of the same file can leave several rows on
+        # one line; every one of them is refreshed so the grid cannot keep
+        # showing an older Tasks/Status value.
+        existing = {}
+        cursor.execute(
+            "SELECT grid_id, source_row_ref FROM production_grid "
+            "WHERE source_row_ref IS NOT NULL AND TRIM(source_row_ref) <> '' "
+            "ORDER BY CAST(SUBSTRING(grid_id, 5) AS UNSIGNED) ASC"
+        )
+        for found in cursor.fetchall():
+            key = (found.get("source_row_ref") or "").strip()
+            existing.setdefault(key, []).append(found["grid_id"])
+        duplicated = {ref: ids for ref, ids in existing.items() if len(ids) > 1}
+        if duplicated:
+            notes.append(
+                f"{len(duplicated)} spreadsheet line(s) already had more than "
+                "one grid row; all of them were refreshed from this file."
+            )
 
         for idx, row, shot_code, tasks, source_ref in valid_rows:
             client_name = _grid_null(row.get("client")) or ""
             show_name = _grid_null(row.get("show")) or ""
-            review_notes = _grid_null(row.get("reviewNotes")) or ""
             try:
                 status = _grid_status(row.get("status"))
                 row_for_insert = dict(row)
                 row_for_insert["tasks"] = tasks
                 params = _grid_db_params(row_for_insert, status)
+                values = (client_name, show_name, shot_code, *params)
+
+                matched = existing.get(source_ref) if source_ref else None
+                if matched:
+                    cursor.executemany(
+                        update_sql, [(*values, grid_id) for grid_id in matched]
+                    )
+                    write_activity_log(
+                        current_user_id,
+                        "Production Management",
+                        "UPDATE",
+                        "Production Grid",
+                        matched[0],
+                        {"source": "bulk import", "status": status},
+                    )
+                    updated += len(matched)
+                    continue
+
                 grid_id = _next_prefixed_id(
                     cursor,
                     "production_grid",
@@ -586,6 +645,8 @@ def bulk_upsert_production_grid(current_user_id):
                         *params,
                     ),
                 )
+                if source_ref:
+                    existing[source_ref] = [grid_id]
                 write_activity_log(
                     current_user_id,
                     "Production Management",

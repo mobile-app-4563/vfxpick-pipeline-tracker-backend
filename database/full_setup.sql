@@ -584,10 +584,7 @@ CREATE TABLE IF NOT EXISTS production_grid (
     tasks VARCHAR(255) DEFAULT NULL,
     review_notes TEXT DEFAULT NULL,
     source_row_ref VARCHAR(80) DEFAULT NULL,
-    status ENUM('Hold', 'Approved', 'Awaiting Approval', 'Approved Internal',
-                'Bidding', 'Bids Received', 'WIP', 'Delivered',
-                'Awaiting Reference', 'Awaiting Plates', 'Completed', 'RTU',
-                'Rough Cost Shared') NOT NULL DEFAULT 'Awaiting Approval',
+    status VARCHAR(120) DEFAULT NULL,
     delivered_on DATE DEFAULT NULL,
     work_station VARCHAR(100) DEFAULT NULL,
     shot_mandays DECIMAL(6,2) DEFAULT 0,
@@ -612,11 +609,9 @@ SET @sql := IF(NOT EXISTS (
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 ALTER TABLE production_grid MODIFY COLUMN tasks VARCHAR(255) DEFAULT NULL;
-ALTER TABLE production_grid MODIFY COLUMN status ENUM(
-    'Hold', 'Approved', 'Awaiting Approval', 'Approved Internal', 'Bidding',
-    'Bids Received', 'WIP', 'Delivered', 'Awaiting Reference',
-    'Awaiting Plates', 'Completed', 'RTU', 'Rough Cost Shared'
-) NOT NULL DEFAULT 'Awaiting Approval';
+-- The grid is a faithful copy of the uploaded spreadsheet, so Status is free
+-- text (see migration_014_production_grid_status_text.sql).
+ALTER TABLE production_grid MODIFY COLUMN status VARCHAR(120) DEFAULT NULL;
 
 -- Seed the grid only when it was newly created and is still empty.
 INSERT INTO production_grid (

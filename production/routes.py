@@ -6,7 +6,6 @@ Includes role-based access control.
 """
 
 from datetime import date, datetime, timedelta
-import re
 
 from flask import Blueprint, request
 
@@ -16,7 +15,7 @@ from access.routes import (
     import_enabled_for_user,
     menu_granted_for_user,
 )
-from common.constants import BROAD_ACCESS_ROLES, SHOT_STATUSES
+from common.constants import BROAD_ACCESS_ROLES
 from common.audit import write_activity_log
 from common.db_utils import (
     generate_prefixed_id,
@@ -97,7 +96,8 @@ def get_production_grid(current_user_id):
                review_notes, status, delivered_on, work_station, shot_mandays,
                approved_client_md, fl_eta, fl_mandays, created_at
         FROM production_grid
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC,
+                 CAST(SUBSTRING(grid_id, 5) AS UNSIGNED) ASC
     """
 
     try:
@@ -281,200 +281,13 @@ def _grid_float(value, default=0.0):
 
 
 def _grid_status(value):
-    status = _grid_null(value) or "Awaiting Approval"
-    return status if status in SHOT_STATUSES else "Awaiting Approval"
+    """The Status cell exactly as the spreadsheet spells it.
 
-
-# ─── Tasks -> pipeline department mapping ────────────────────────────────────
-# Real spreadsheets spell the built-in work many ways. Runtime-created task
-# labels such as CAMERA TRACK, OBJECT TRACK and ROTOANIM stay separate so the
-# import honours the department list configured by the user.
-#
-# Matching is case-insensitive: "roto", "Roto" and "ROTO" all normalise onto
-# the same canonical department, as do "camera track" / "Camera Track" /
-# "CAMERA TRACK".
-#
-# A value that cannot be recognised is NEVER rejected — it is kept verbatim
-# (upper-cased) and the frontend offers it as an extra Department filter
-# option, so its rows stay reachable.
-GRID_DEPARTMENTS = ["ROTO", "PAINT", "MM", "COMP"]
-
-# Spreadsheet spelling -> canonical department. Mirrors
-# frontend/lib/modules/production_management/utils/grid_department_mapper.dart.
-GRID_TASK_ALIAS = {
-    # ROTO — rotoscoping and keying.
-    "ROTO": "ROTO",
-    "ROTOSCOPE": "ROTO",
-    "ROTOSCOPY": "ROTO",
-    "ROTOANIM": "ROTO",
-    "ROTOANIMATION": "ROTO",
-    "ROTO ANIM": "ROTO",
-    "ROTO ANIMATION": "ROTO",
-    "ROTOKEY": "ROTO",
-    "ROTO KEY": "ROTO",
-    "ROTO KEYING": "ROTO",
-    "KEYING": "ROTO",
-    # PAINT — cleanup, prep and matte painting.
-    "PAINT": "PAINT",
-    "PAINTING": "PAINT",
-    "DIGI PAINT": "PAINT",
-    "DIGITAL PAINT": "PAINT",
-    "PREP": "PAINT",
-    "CLEANUP": "PAINT",
-    "CLEAN UP": "PAINT",
-    "DUSTBUST": "PAINT",
-    "DUST BUST": "PAINT",
-    "WIRE REMOVAL": "PAINT",
-    "DMP": "PAINT",
-    "MATTE": "PAINT",
-    "MATTE PAINTING": "PAINT",
-    # MM — matchmove, tracking and modelling.
-    "MM": "MM",
-    "MATCHMOVE": "MM",
-    "MATCH MOVE": "MM",
-    "MATCHMOTION": "MM",
-    "MATCH MOTION": "MM",
-    "CAM TRACK": "MM",
-    "CAMTRACK": "MM",
-    "OBJ TRACK": "MM",
-    "PLANAR TRACK": "MM",
-    "PLANE TRACK": "MM",
-    "3D TRACK": "MM",
-    "MOTION TRACK": "MM",
-    "TRACKING": "MM",
-    "MODELING": "MM",
-    "MODELLING": "MM",
-    "RETOPO": "MM",
-    "RETOPOLOGY": "MM",
-    "RIGGING": "MM",
-    "UV": "MM",
-    "TEXTURE": "MM",
-    "SHADING": "MM",
-    "LOOKDEV": "MM",
-    "LOOK DEV": "MM",
-    # COMP — compositing.
-    "COMP": "COMP",
-    "COMPOSITING": "COMP",
-    "COMPOSITE": "COMP",
-    "CGI": "COMP",
-}
-
-# Separators real sheets use between two departments on one row.
-_GRID_TASK_SEPARATOR = re.compile(r"[,/&+]|\bAND\b")
-_PRESERVED_GRID_TASK_LABELS = {
-    "CAMERA TRACK",
-    "OBJECT TRACK",
-    "ROTOANIM",
-    "ROTO ANIM",
-    "ROTOANIMATION",
-}
-
-# Alias keys longest-first, so "ROTO ANIM" wins over "ROTO".
-_GRID_ALIAS_KEYS = sorted(GRID_TASK_ALIAS, key=len, reverse=True)
-
-
-def _match_grid_task_alias(part):
-    """Longest alias appearing as a whole word inside ``part``, else None.
-
-    Whole-word matching keeps ``ROTO ANIM`` from resolving to ``ROTO`` first
-    and stops ``COMPUTER`` / ``PAINTER`` matching ``COMP`` / ``PAINT``.
+    Import is a faithful copy of the file, so the value is never mapped onto a
+    fixed list and never replaced with a default: ``HOLD``, ``Hold as of now``
+    and ``Delivererd`` are all stored as written. A blank cell becomes NULL.
     """
-    for key in _GRID_ALIAS_KEYS:
-        if part == key:
-            return GRID_TASK_ALIAS[key]
-        if re.search(r"(^|\s)" + re.escape(key) + r"($|\s)", part):
-            return GRID_TASK_ALIAS[key]
-    return None
-
-
-def normalize_grid_tasks(raw):
-    """Map a free-text Tasks/Department value onto the pipeline departments.
-
-    A value may name several departments (``PAINT / COMP``, ``ROTO + PAINT +
-    TRACKING``); those are split on ``,`` ``/`` ``&`` ``+`` ``AND`` and stored
-    comma-separated in pipeline order. Parts that match no known spelling are
-    kept verbatim, upper-cased and trimmed — never rejected.
-
-    Returns ``''`` for an empty/blank input.
-    """
-    # Upper-case for case-insensitive matching, and collapse repeated
-    # whitespace so "CaMeRa   TrAcK" matches the same alias as "CAMERA TRACK".
-    value = re.sub(r"\s+", " ", str(raw or "").strip().upper())
-    if not value:
-        return ""
-    if value in _PRESERVED_GRID_TASK_LABELS:
-        return value
-    parts = [p.strip() for p in _GRID_TASK_SEPARATOR.split(value) if p.strip()]
-    if not parts:
-        return value
-    mapped = []
-    for part in parts:
-        resolved = (
-            GRID_TASK_ALIAS.get(part) or _match_grid_task_alias(part) or part
-        )
-        if resolved not in mapped:
-            mapped.append(resolved)
-    ordered = [d for d in GRID_DEPARTMENTS if d in mapped]
-    ordered += sorted(m for m in mapped if m not in GRID_DEPARTMENTS)
-    # A value that already was exactly one known department is unchanged.
-    if len(ordered) == 1 and ordered[0] == value:
-        return value
-    return ", ".join(ordered)
-
-
-_GRID_TASKS_BACKFILL_DONE = False
-
-
-def _ensure_grid_tasks_normalized():
-    """One-off: rewrite ``production_grid.tasks`` into the canonical form.
-
-    Rows imported before the Tasks -> department mapping existed still hold raw
-    spreadsheet spellings (``CAMERA TRACK``, ``ROTOANIM``, ``paint / comp``),
-    which the Department filter cannot match. This aligns the stored
-    ``tasks`` text with the canonical department values used by the grid.
-
-    Runs at most once per process — the first grid read or import after a
-    restart does the tidy-up. Values that cannot be recognised are left as they
-    are; nothing is ever deleted. Failures are swallowed so a read can never be
-    blocked by the tidy-up.
-    """
-    global _GRID_TASKS_BACKFILL_DONE
-    if _GRID_TASKS_BACKFILL_DONE:
-        return
-    # Set before the work so a transient failure cannot retry on every request.
-    _GRID_TASKS_BACKFILL_DONE = True
-
-    conn = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True, buffered=True)
-        cursor.execute(
-            "SELECT grid_id, tasks FROM production_grid "
-            "WHERE tasks IS NOT NULL AND TRIM(tasks) <> ''"
-        )
-        updates = []
-        for row in cursor.fetchall():
-            normalized = normalize_grid_tasks(row.get("tasks"))
-            if normalized and normalized != row.get("tasks"):
-                updates.append((normalized, row["grid_id"]))
-        if updates:
-            cursor.executemany(
-                "UPDATE production_grid SET tasks = %s WHERE grid_id = %s",
-                updates,
-            )
-            conn.commit()
-    except Exception:
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    return _grid_null(value)
 
 
 # ─── Import row identity: source_row_ref ─────────────────────────────────────

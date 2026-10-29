@@ -1,0 +1,42 @@
+-- ============================================================
+-- migration_014: production_grid.status becomes free text
+-- ------------------------------------------------------------
+-- WHY THIS EXISTS
+-- The production grid import is a faithful copy of the uploaded
+-- spreadsheet: every cell is stored as written, nothing is mapped, corrected
+-- or replaced with a default. The status column was the last hold-out - it was
+-- an ENUM of 13 values, so any line whose Status cell read anything else was
+-- silently rewritten to 'Awaiting Approval' by the API.
+--
+-- Measured on Master SHEET 2026.xlsx (13,172 data lines):
+--     'Hold as of now' ................. 249
+--     'Plates received' ................ 239
+--     'No Scope' ......................... 70
+--     'No work' .......................... 16
+--     'Graded plates' .................... 19
+--     'No ref' ........................... 9
+--     'Delivererd' (sic) ................. 8
+--     'Plates rec' ....................... 5
+--     'Rough bids shared' ................ 3
+--     'Hold for now' ..................... 3
+--     'Upgraded plates received' ......... 4
+--     'Hold / Delivered', 'QT received', 'Updated plate(s) received',
+--     'RTU / Hold', 'Delivered / HOLD', 'Hold/ V002', 'reference plates',
+--     'Updated ref received', 'As of now hold', 'Already done' ... 15
+--     '-' (blank marker) ................. 4
+--                                                    ~646 lines rewritten
+--
+-- WHAT THIS DOES
+-- Widens the column to VARCHAR so those values survive the import. The column
+-- also becomes NULLable: a blank Status cell is stored as NULL instead of being
+-- invented as 'Awaiting Approval'. Values already in the table are preserved -
+-- ENUM -> VARCHAR keeps the string exactly.
+--
+-- SAFETY
+-- Idempotent: re-running simply re-declares the same type. No row is touched.
+-- The Status filter in the grid picks up whatever values are present in the
+-- data, so no frontend list needs to know this set in advance.
+-- ============================================================
+
+ALTER TABLE production_grid
+    MODIFY COLUMN status VARCHAR(120) DEFAULT NULL;

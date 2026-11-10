@@ -20,11 +20,11 @@
 --
 -- WHAT THIS COLUMN DOES
 -- source_row_ref stores the line's row number inside the imported file, e.g.
--- "Sheet1!12" for Excel or "csv:12" / "paste:12" for text. It becomes part of
--- the import's row identity, so:
+-- "Sheet1!12" for Excel or "csv:12" / "paste:12" for text. It is provenance
+-- only; it is not a row identity. Every import inserts new rows, including
+-- when the same file is imported more than once. Therefore:
 --   * every physical spreadsheet line keeps its own grid row, and
---   * re-importing the SAME file updates those same rows instead of
---     duplicating them (the import stays idempotent).
+--   * re-importing a file appends new rows rather than changing existing rows.
 -- Rows created by hand keep source_row_ref = NULL and behave exactly as before.
 --
 -- SAFETY

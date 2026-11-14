@@ -536,10 +536,17 @@ def update_shot(current_user_id, shot_id):
     existing = run_query("SELECT department FROM shots WHERE shot_id = %s", (shot_id,), fetch_one=True)
     if not existing:
         return failure("Shot not found", 404)
-    if not _can_access(get_user(current_user_id), existing["department"]):
+    user = get_user(current_user_id)
+    if not _can_access(user, existing["department"]):
         return failure("You are not allowed to modify this department.", 403)
 
     data = request.get_json(silent=True) or {}
+    # Inline grid edits commit the shot code; never allow it to be blanked.
+    if "shotCode" in data:
+        shot_code = (data.get("shotCode") or "").strip()
+        if not shot_code:
+            return failure("Shot ID cannot be empty.", 400)
+        data["shotCode"] = shot_code
     field_map = {
         "shotCode": "shot_code",
         "frameIn": "frame_in",
@@ -593,6 +600,52 @@ def update_shot(current_user_id, shot_id):
             params.append(
                 to_sql_date(data[json_key]) if json_key in date_fields else data[json_key]
             )
+
+    # Artist assignment: the inline dropdown sends an existing user's name.
+    # Unknown names are rejected instead of auto-creating import placeholders.
+    if "artistName" in data:
+        artist_name = " ".join((data.get("artistName") or "").split())
+        if artist_name in ("", "-", "—"):
+            sets.append("artist_id = NULL")
+        else:
+            artist = run_query(
+                "SELECT user_id FROM users WHERE LOWER(TRIM(name)) = %s "
+                "ORDER BY (department = %s) DESC, user_id LIMIT 1",
+                (artist_name.lower(), existing["department"]),
+                fetch_one=True,
+            )
+            if not artist:
+                return failure(f"Artist '{artist_name}' not found.", 400)
+            sets.append("artist_id = %s")
+            params.append(artist["user_id"])
+
+    # Department may be moved between accessible departments only.
+    if "department" in data:
+        dept_parts = _split_departments(data.get("department"))
+        if not dept_parts:
+            return failure("Department cannot be empty.", 400)
+        allowed_departments = _accessible_departments(user)
+        if any(part not in allowed_departments for part in dept_parts):
+            return failure(
+                "You are not allowed to move this shot to that department.", 403
+            )
+        sets.append("department = %s")
+        params.append(",".join(dept_parts))
+
+    # Show reassignment (inline Show column commits a showId).
+    if "showId" in data:
+        new_show_id = (data.get("showId") or "").strip()
+        if not new_show_id:
+            return failure("Show cannot be empty.", 400)
+        target_show = run_query(
+            "SELECT show_id FROM shows WHERE show_id = %s",
+            (new_show_id,),
+            fetch_one=True,
+        )
+        if not target_show:
+            return failure("Show not found.", 404)
+        sets.append("show_id = %s")
+        params.append(target_show["show_id"])
 
     if not sets:
         return failure("No fields to update.", 400)
